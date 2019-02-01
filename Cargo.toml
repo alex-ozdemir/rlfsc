@@ -1,0 +1,9 @@
+[package]
+name = "rlfsc"
+version = "0.1.0"
+authors = ["Alex Ozdemir <aozdemir@hmc.edu>"]
+edition = "2018"
+
+[dependencies]
+tokio = "0.1.15"
+bytes = "0.4.11"
