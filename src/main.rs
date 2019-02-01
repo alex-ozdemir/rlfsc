@@ -1,17 +1,116 @@
 extern crate bytes;
 extern crate tokio;
+extern crate ux;
 
 use bytes::{BufMut, BytesMut};
 use tokio::codec::{Decoder, Encoder, FramedRead};
 use tokio::prelude::*;
+use ux::u5;
 
 use std::io;
+
+#[derive(PartialEq, Eq, Debug)]
+enum LfscKeyword {
+    Declare,
+    Define,
+    Type,
+    Check,
+    Percent,
+    Caret,
+    Bang,
+    At,
+    Let,
+    Colon,
+    Tilde,
+    Solidus,
+    ReverseSolidus,
+    Do,
+    Match,
+    MpAdd,
+    MpNeg,
+    MpDiv,
+    MpMul,
+    MpIfNeg,
+    MpIfZero,
+    IfEqual,
+    Compare,
+    Fail,
+    MarkVar(u5),
+    IfMarked(u5),
+}
+
+impl std::fmt::Display for LfscKeyword {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
+        match self {
+            LfscKeyword::Declare => write!(f, "declare"),
+            LfscKeyword::Define => write!(f, "define"),
+            LfscKeyword::Type => write!(f, "type"),
+            LfscKeyword::Check => write!(f, "check"),
+            LfscKeyword::Percent => write!(f, "%"),
+            LfscKeyword::Caret => write!(f, "^"),
+            LfscKeyword::Bang => write!(f, "!"),
+            LfscKeyword::At => write!(f, "@"),
+            LfscKeyword::Let => write!(f, "let"),
+            LfscKeyword::Colon => write!(f, ":"),
+            LfscKeyword::Tilde => write!(f, "~"),
+            LfscKeyword::Solidus => write!(f, "/"),
+            LfscKeyword::ReverseSolidus => write!(f, "\\"),
+            LfscKeyword::Do => write!(f, "do"),
+            LfscKeyword::Match => write!(f, "match"),
+            LfscKeyword::MpAdd => write!(f, "mp_add"),
+            LfscKeyword::MpNeg => write!(f, "mp_neg"),
+            LfscKeyword::MpDiv => write!(f, "mp_div"),
+            LfscKeyword::MpMul => write!(f, "mp_mul"),
+            LfscKeyword::MpIfNeg => write!(f, "mp_ifneg"),
+            LfscKeyword::MpIfZero => write!(f, "mp_ifzero"),
+            LfscKeyword::IfEqual => write!(f, "ifequal"),
+            LfscKeyword::Compare => write!(f, "compare"),
+            LfscKeyword::Fail => write!(f, "fail"),
+            LfscKeyword::IfMarked(u) => write!(f, "ifmaked{}", u),
+            LfscKeyword::MarkVar(u) => write!(f, "markvar{}", u),
+        }
+    }
+}
 
 #[derive(PartialEq, Eq, Debug)]
 enum LispToken {
     Open,
     Close,
     Ident(String),
+    Keyword(LfscKeyword),
+}
+
+impl LispToken {
+    /// Given a slice of non-grouping, non-whitespace characters, parses a LispToken
+    fn from_ident(ident: &[u8]) -> Result<Self, io::Error> {
+        Ok(match ident {
+            b"declare" => LispToken::Keyword(LfscKeyword::Declare),
+            b"define" => LispToken::Keyword(LfscKeyword::Define),
+            b"type" => LispToken::Keyword(LfscKeyword::Type),
+            b"check" => LispToken::Keyword(LfscKeyword::Check),
+            b"%" => LispToken::Keyword(LfscKeyword::Percent),
+            b"^" => LispToken::Keyword(LfscKeyword::Caret),
+            b"!" => LispToken::Keyword(LfscKeyword::Bang),
+            b"@" => LispToken::Keyword(LfscKeyword::At),
+            b"let" => LispToken::Keyword(LfscKeyword::Let),
+            b":" => LispToken::Keyword(LfscKeyword::Colon),
+            b"~" => LispToken::Keyword(LfscKeyword::Tilde),
+            b"/" => LispToken::Keyword(LfscKeyword::Solidus),
+            b"\\" => LispToken::Keyword(LfscKeyword::ReverseSolidus),
+            b"do" => LispToken::Keyword(LfscKeyword::Do),
+            b"match" => LispToken::Keyword(LfscKeyword::Match),
+            b"mp_add" => LispToken::Keyword(LfscKeyword::MpAdd),
+            b"mp_neg" => LispToken::Keyword(LfscKeyword::MpNeg),
+            b"mp_div" => LispToken::Keyword(LfscKeyword::MpDiv),
+            b"mp_mul" => LispToken::Keyword(LfscKeyword::MpMul),
+            b"mp_ifneg" => LispToken::Keyword(LfscKeyword::MpIfNeg),
+            b"mp_ifzero" => LispToken::Keyword(LfscKeyword::MpIfZero),
+            b"ifequal" => LispToken::Keyword(LfscKeyword::IfEqual),
+            b"compare" => LispToken::Keyword(LfscKeyword::Compare),
+            b"fail" => LispToken::Keyword(LfscKeyword::Fail),
+            _ => LispToken::Ident(std::str::from_utf8(&ident).map_err(bad_utf8)?.to_owned()),
+        })
+    }
 }
 
 struct LispTokenCodec {
@@ -60,6 +159,9 @@ impl Encoder for LispTokenCodec {
                 }
                 self.last_token_was_an_identifier = true;
             }
+            LispToken::Keyword(k) => {
+                write!(buf.writer(), "{}", k).unwrap();
+            }
         }
         Ok(())
     }
@@ -105,9 +207,7 @@ impl Decoder for LispTokenCodec {
                             .position(|b| b.is_ascii_whitespace() || *b == b')' || *b == b'(')
                         {
                             let ident = buf.split_to(first_non_ident);
-                            return Ok(Some(LispToken::Ident(
-                                std::str::from_utf8(&ident).map_err(bad_utf8)?.to_owned(),
-                            )));
+                            return Ok(Some(LispToken::from_ident(&ident)?));
                         } else {
                             return Ok(None);
                         }
@@ -128,11 +228,7 @@ impl Decoder for LispTokenCodec {
                 if buf.is_empty() {
                     None
                 } else {
-                    Some(LispToken::Ident(
-                        std::str::from_utf8(&buf.take()[..])
-                            .map_err(bad_utf8)?
-                            .to_owned(),
-                    ))
+                    Some(LispToken::from_ident(&buf.take()[..])?)
                 }
             }
         })
