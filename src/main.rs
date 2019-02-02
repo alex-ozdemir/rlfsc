@@ -8,8 +8,9 @@ use tokio::prelude::*;
 use ux::u5;
 
 use std::io;
+use std::str::FromStr;
 
-#[derive(PartialEq, Eq, Debug)]
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 enum LfscKeyword {
     Declare,
     Define,
@@ -41,7 +42,7 @@ enum LfscKeyword {
 
 impl std::fmt::Display for LfscKeyword {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        match self {
+        match *self {
             LfscKeyword::Declare => write!(f, "declare"),
             LfscKeyword::Define => write!(f, "define"),
             LfscKeyword::Type => write!(f, "type"),
@@ -66,8 +67,8 @@ impl std::fmt::Display for LfscKeyword {
             LfscKeyword::IfEqual => write!(f, "ifequal"),
             LfscKeyword::Compare => write!(f, "compare"),
             LfscKeyword::Fail => write!(f, "fail"),
-            LfscKeyword::IfMarked(u) => write!(f, "ifmaked{}", u),
-            LfscKeyword::MarkVar(u) => write!(f, "markvar{}", u),
+            LfscKeyword::IfMarked(u) => write!(f, "ifmarked{}", u16::from(u) + 1),
+            LfscKeyword::MarkVar(u) => write!(f, "markvar{}", u16::from(u) + 1),
         }
     }
 }
@@ -108,6 +109,24 @@ impl LispToken {
             b"ifequal" => LispToken::Keyword(LfscKeyword::IfEqual),
             b"compare" => LispToken::Keyword(LfscKeyword::Compare),
             b"fail" => LispToken::Keyword(LfscKeyword::Fail),
+            buf if &buf[..8] == b"ifmarked" => {
+                let s = std::str::from_utf8(&buf[8..]).map_err(bad_utf8)?;
+                let u = usize::from_str(s).map_err(bad_int)?;
+                if u >= 1 && u <= 32 {
+                    LispToken::Keyword(LfscKeyword::IfMarked(u5::new(u as u8)))
+                } else {
+                    return Err(bad_mark_num())
+                }
+            }
+            buf if &buf[..7] == b"markvar" => {
+                let s = std::str::from_utf8(&buf[7..]).map_err(bad_utf8)?;
+                let u = usize::from_str(s).map_err(bad_int)?;
+                if u >= 1 && u <= 32 {
+                    LispToken::Keyword(LfscKeyword::MarkVar(u5::new(u as u8)))
+                } else {
+                    return Err(bad_mark_num())
+                }
+            }
             _ => LispToken::Ident(std::str::from_utf8(&ident).map_err(bad_utf8)?.to_owned()),
         })
     }
@@ -131,6 +150,16 @@ impl LispTokenCodec {
 fn bad_utf8<E>(_: E) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Unable to decode input as UTF8")
 }
+
+// Turns int parse into io::Error
+fn bad_int<E>(_: E) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "Unable to parse integer")
+}
+
+fn bad_mark_num() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "Mark number is out of bounds")
+}
+
 
 impl Encoder for LispTokenCodec {
     type Item = LispToken;
