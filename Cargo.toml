@@ -8,6 +8,7 @@ edition = "2018"
 lto = true
 
 [dependencies]
-tokio = "0.1.15"
 bytes = "0.4.11"
+num = "0.2"
+tokio = "0.1.15"
 ux = "0.1"
