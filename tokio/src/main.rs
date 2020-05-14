@@ -1,6 +1,5 @@
 #![feature(box_syntax)]
 #![feature(box_patterns)]
-#![feature(iter_unfold)]
 extern crate bytes;
 extern crate num;
 extern crate tokio;
@@ -137,7 +136,7 @@ impl TokenStream for Parser {
 }
 
 fn clone_err(e: &io::Error) -> io::Error {
-    io::Error::new(e.kind(), e.description())
+    io::Error::new(e.kind(), e.to_string())
 }
 
 impl Parser {

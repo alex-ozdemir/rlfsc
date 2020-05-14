@@ -1,6 +1,5 @@
 #![feature(box_syntax)]
 #![feature(box_patterns)]
-#![feature(iter_unfold)]
 extern crate bytes;
 extern crate num;
 extern crate tokio;
@@ -150,7 +149,7 @@ struct Parser {
 }
 
 fn clone_err(e: &io::Error) -> io::Error {
-    io::Error::new(e.kind(), e.description())
+    io::Error::new(e.kind(), e.to_string())
 }
 
 pub fn expected_err<E: Display + ?Sized, F: Display + ?Sized>(
@@ -389,7 +388,7 @@ impl Checker {
         for c in p {
             match c {
                 Command::Check(t) => {
-                    let ty = self.check_type(t)?;
+                    let _ty = self.check_type(t)?;
                     //println!("term {:?} has type {:?}", t, ty);
                 }
                 Command::Declare(ref name, ref kind) => {
