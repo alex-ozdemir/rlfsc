@@ -1,0 +1,12 @@
+[package]
+name = "logos"
+version = "0.1.0"
+authors = ["Alex Ozdemir <aozdemir@hmc.edu>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+logos = "^0.11.4"
+thiserror = "1.0.18"
+anyhow = "1.0.31"
