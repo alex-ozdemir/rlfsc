@@ -1,12 +1,14 @@
+#![feature(move_ref_pattern)]
+
 use logos::Logos;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::convert::{From, Into};
 use std::default::Default;
 use std::env::args;
+use std::fmt::{self, Display, Formatter};
 use std::fs::read;
 use std::rc::Rc;
-use std::fmt::{Formatter, Display, self};
 use std::str::from_utf8;
 
 use thiserror::Error;
@@ -14,14 +16,15 @@ use thiserror::Error;
 mod code;
 mod token;
 
-use code::{parse_term, Code, CodeParseError, Cond, MpBinOp, MpCond, Pattern};
+use code::{parse_term, Code, CodeParseError, MpBinOp, MpCond, Pattern};
+use rug::{Integer, Rational};
 use token::{Lexer, Token, TokenError};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Program {
     args: Vec<(String, Rc<Expr>)>,
     ret_ty: Rc<Expr>,
-    body: Code,
+    body: Rc<Code>,
 }
 
 #[derive(Error, Debug)]
@@ -62,6 +65,14 @@ enum LfscError {
     CodeParseError(CodeParseError),
     #[error("The identifier {2} is an {1} but should be a {0}")]
     WrongIdentifierType(&'static str, &'static str, String),
+    #[error("{0:?} cannot be applied to {1} and {2}, because one is not arithmetic")]
+    NotMpInBin(code::MpBinOp, Expr, Expr),
+    #[error("{0} cannot be negated because it is not arithmetic")]
+    NotMpInNeg(Expr),
+    #[error("The applications\n\t{0}\nand\n\t{1}\ncannot be equal because they have different numbers of arguments")]
+    AppArgcMismatch(Expr, Expr),
+    #[error("Cannot mark\n\t{0:?}\nbecause it is not a variable.")]
+    CannotMark(Expr),
 }
 
 impl From<TokenError> for LfscError {
@@ -82,13 +93,12 @@ enum Expr {
     Type,
     Kind,
     NatTy,
-    NatLit(u64),
+    NatLit(Integer),
     RatTy,
-    MpNeg(Rc<Expr>),
-    RatLit(u64, u64),
-    Var(Rc<String>),
+    RatLit(Rational),
+    Var(Rc<String>, Cell<u32>),
     /// eval expression, name, type
-    Run(Code, Rc<String>, Rc<Expr>),
+    Run(Code, Rc<Expr>, Rc<Expr>),
     Pi {
         var: Rc<String>,
         dom: Rc<Expr>,
@@ -109,11 +119,10 @@ impl Display for Expr {
             NatTy => write!(f, "mpz"),
             RatTy => write!(f, "mpq"),
             NatLit(u) => write!(f, "{}", u),
-            RatLit(n,d) => write!(f, "{}/{}", n, d),
-            Var(s) => write!(f, "{}", s),
-            MpNeg(s) => write!(f, "(~ {})", s),
+            RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
+            Var(s, m) => write!(f, "{}[{:b}]", s, m.get()),
             Run(c, n, e) => write!(f, "(^ ({:?} {}) {})", c, n, e),
-            Pi{var, dom, rng} => write!(f, "(! {} {} {})", var, dom, rng),
+            Pi { var, dom, rng } => write!(f, "(! {} {} {})", var, dom, rng),
             App(head, tail) => {
                 write!(f, "({}", head)?;
                 for t in tail {
@@ -143,23 +152,13 @@ impl Expr {
             false
         }
     }
-    fn new_rat(numerator: u64, denominator: u64) -> Expr {
-        fn gcd(mut a: u64, mut b: u64) -> u64 {
-            if a < b {
-                std::mem::swap(&mut a, &mut b);
-            }
-            while b != 0 {
-                let new_b = a % b;
-                a = b;
-                b = new_b;
-            }
-            return a;
-        }
-        let g = gcd(numerator, denominator);
-        Expr::RatLit(numerator / g, denominator / g)
-    }
+
     fn new_hole() -> Expr {
         Expr::Hole(RefCell::new(None))
+    }
+
+    fn new_var(s: Rc<String>) -> Expr {
+        Expr::Var(s, Cell::new(0))
     }
 
     fn deref_holes(mut r: Rc<Self>) -> Rc<Expr> {
@@ -178,10 +177,35 @@ impl Expr {
         r
     }
 
+    fn mp_neg(&self) -> Result<Expr, LfscError> {
+        match self {
+            Expr::NatLit(i) => Ok(Expr::NatLit(-i.clone())),
+            Expr::RatLit(i) => Ok(Expr::RatLit(-i.clone())),
+            a => Err(LfscError::NotMpInNeg(a.clone())),
+        }
+    }
+
+    fn mp_bin(&self, op: MpBinOp, other: &Expr) -> Result<Expr, LfscError> {
+        match (self, other) {
+            (Expr::NatLit(x), Expr::NatLit(y)) => Ok(Expr::NatLit(match op {
+                MpBinOp::Add => Integer::from(x + y),
+                MpBinOp::Div => Integer::from(x / y),
+                MpBinOp::Mul => Integer::from(x * y),
+            })),
+            (Expr::RatLit(x), Expr::RatLit(y)) => Ok(Expr::RatLit(match op {
+                MpBinOp::Add => Rational::from(x + y),
+                MpBinOp::Div => Rational::from(x / y),
+                MpBinOp::Mul => Rational::from(x * y),
+            })),
+            (a, b) => Err(LfscError::NotMpInBin(op.clone(), a.clone(), b.clone())),
+        }
+    }
+
     fn unify(a: Rc<Self>, b: Rc<Self>) -> Result<Rc<Self>, LfscError> {
         if a == b {
             Ok(a.clone())
         } else {
+            //println!("Unify: {} {}", a, b);
             let aa = Expr::deref_holes(a).clone();
             let bb = Expr::deref_holes(b).clone();
             Ok((match (aa.as_ref(), bb.as_ref()) {
@@ -204,10 +228,10 @@ impl Expr {
                         }
                         Ok(aa)
                     } else {
-                        Err(LfscError::Misc("len mismatch"))
+                        Err(LfscError::AppArgcMismatch((*aa).clone(), (*bb).clone()))
                     }
                 }
-                (Expr::Var(x), Expr::Var(y)) if x == y => Ok(aa),
+                (Expr::Var(x, _), Expr::Var(y, _)) if x == y => Ok(aa),
                 _ => Err(LfscError::TypeMismatch(aa.clone(), bb.clone())),
             })?)
         }
@@ -216,7 +240,7 @@ impl Expr {
     fn sub(this: &Rc<Self>, name: &str, value: &Rc<Expr>) -> Rc<Self> {
         use Expr::*;
         match this.as_ref() {
-            &Var(ref name_) => {
+            &Var(ref name_, _) => {
                 if name == &**name_ {
                     value.clone()
                 } else {
@@ -226,6 +250,11 @@ impl Expr {
             &App(ref f, ref args) => Rc::new(App(
                 Expr::sub(f, name, value),
                 args.iter().map(|a| Expr::sub(a, name, value)).collect(),
+            )),
+            &Run(ref code, ref var, ref body) => Rc::new(Run(
+                code.sub(name, value),
+                Expr::sub(var, name, value),
+                Expr::sub(body, name, value),
             )),
             &Pi {
                 ref var,
@@ -243,6 +272,27 @@ impl Expr {
                 }
             }
             _ => this.clone(),
+        }
+    }
+    pub fn toggle_mark(this: Rc<Self>, m: u8) -> Result<(), LfscError> {
+        debug_assert!(m <= 32 && m >= 1);
+        let t = Expr::deref_holes(this.clone());
+        if let Expr::Var(_, ref marks) = t.as_ref() {
+            marks.set((1u32 << (m - 1)) ^ marks.get());
+            println!("Post mark: {} {}", m, t);
+            Ok(())
+        } else {
+            Err(LfscError::CannotMark((*this).clone()))
+        }
+    }
+    pub fn get_mark(this: Rc<Self>, m: u8) -> Result<bool, LfscError> {
+        debug_assert!(m <= 32 && m >= 1);
+        let t = Expr::deref_holes(this.clone());
+        println!("Get mark: {} {}", m, t);
+        if let Expr::Var(_, ref marks) = t.as_ref() {
+            Ok((1u32 << (m - 1)) & marks.get() != 0)
+        } else {
+            Err(LfscError::CannotMark((*this).clone()))
         }
     }
 }
@@ -348,30 +398,12 @@ fn consume_var(ts: &mut Lexer) -> Result<Rc<String>, LfscError> {
     Ok(Rc::new(ts.consume_ident()?))
 }
 
-fn type_pi(ts: &mut Lexer, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
-    let var = consume_var(ts)?;
-    let domain = cons_check(ts, e, e.type_.clone())?;
-    let old_binding = e.bind_expr(
-        (*var).clone(),
-        Rc::new(Expr::Var(var.clone())),
-        domain.clone(),
-    );
-    let (range, range_ty) = cons_type(ts, e)?;
-    ts.consume_tok(Token::Close)?;
-    e.unbind(&var, old_binding);
-    if *range_ty == Expr::Type || *range_ty == Expr::Kind {
-        Ok(range_ty)
-    } else {
-        Err(LfscError::InvalidPiRange(range_ty.clone()))
-    }
-}
-
 fn cons_type_pi(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_var(ts)?;
     let domain = cons_check(ts, e, e.type_.clone())?;
     let old_binding = e.bind_expr(
         (*var).clone(),
-        Rc::new(Expr::Var(var.clone())),
+        Rc::new(Expr::new_var(var.clone())),
         domain.clone(),
     );
     let (range, range_ty) = cons_type(ts, e)?;
@@ -411,7 +443,7 @@ fn cons_type_ascription(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Exp
 fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_var(ts)?;
     let ty = cons_check(ts, e, e.type_.clone())?;
-    let old_binding = e.bind_expr((*var).clone(), Rc::new(Expr::Var(var.clone())), ty);
+    let old_binding = e.bind_expr((*var).clone(), Rc::new(Expr::new_var(var.clone())), ty);
     let (v, t) = cons_type(ts, e)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
@@ -439,8 +471,155 @@ fn same_types(tys: impl IntoIterator<Item = Rc<Expr>>) -> Result<Rc<Expr>, LfscE
     }
 }
 
-fn run_code(_e: &mut Env, _code: &Code) -> Result<Rc<Expr>, LfscError> {
-    unimplemented!()
+fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
+    eprintln!("Run: {:?}", code);
+    match code {
+        Code::Var(s) => Ok(e.expr_value(&s)?.clone()),
+        Code::App(ref fn_name, ref arg_terms) => {
+            let args = arg_terms
+                .iter()
+                .map(|a| run_code(e, a))
+                .collect::<Result<Vec<_>, _>>()?;
+            match e.binding(fn_name)? {
+                EnvEntry::Program(pgm) => {
+                    let formal_args = pgm.val.args.clone();
+                    let body = pgm.val.body.clone();
+                    if formal_args.len() == args.len() {
+                        let unbinds: Vec<_> = formal_args
+                            .iter()
+                            .zip(args.iter())
+                            .map(|((name, _), a)| {
+                                e.bind_expr(name.clone(), a.clone(), e.bot.clone())
+                            })
+                            .collect();
+                        let r = run_code(e, body.as_ref())?;
+                        for (u, (n, _)) in unbinds.into_iter().zip(formal_args.iter()) {
+                            e.unbind(&n, u);
+                        }
+                        Ok(r)
+                    } else {
+                        Err(LfscError::Misc("Wrong number of arguments"))
+                    }
+                }
+                EnvEntry::Expr(expr) => Ok(Rc::new(Expr::App(expr.val.clone(), args))),
+            }
+        }
+        Code::NatLit(i) => Ok(Rc::new(Expr::NatLit(i.clone()))),
+        Code::RatLit(r) => Ok(Rc::new(Expr::RatLit(r.clone()))),
+        Code::Do(xs, y) => {
+            for x in xs {
+                run_code(e, x)?;
+            }
+            run_code(e, y)
+        }
+        Code::Let(n, v, body) => {
+            let vv = run_code(e, v)?;
+            let o = e.bind_expr(n.clone(), vv, e.bot.clone());
+            let r = run_code(e, body)?;
+            e.unbind(&n, o);
+            Ok(r)
+        }
+        Code::Cond(c, l, r, t, f) => {
+            let ll = run_code(e, l)?;
+            let rr = run_code(e, r)?;
+            if match c {
+                code::Cond::Equal => Rc::into_raw(ll) == Rc::into_raw(rr),
+                code::Cond::LessThan => Rc::into_raw(ll) < Rc::into_raw(rr),
+            } {
+                run_code(e, t)
+            } else {
+                run_code(e, f)
+            }
+        }
+        Code::NatToRat(i) => {
+            if let Expr::NatLit(x) = run_code(e, i)?.as_ref() {
+                Ok(Rc::new(Expr::RatLit(Rational::new() + x)))
+            } else {
+                Err(LfscError::Misc("non-nat in mpz_to_mpq"))
+            }
+        }
+        Code::Fail(..) => Err(LfscError::Misc("fail")),
+        Code::MpNeg(i) => run_code(e, i)?.as_ref().mp_neg().map(Rc::new),
+        Code::MpBin(o, i, j) => run_code(e, i)?
+            .as_ref()
+            .mp_bin(*o, run_code(e, j)?.as_ref())
+            .map(Rc::new),
+        Code::MpCond(o, i, j, k) => match run_code(e, i)?.as_ref() {
+            Expr::NatLit(x) => {
+                if match o {
+                    MpCond::Neg => x < &(0 as u64),
+                    MpCond::Zero => x == &(0 as u64),
+                } {
+                    run_code(e, j)
+                } else {
+                    run_code(e, k)
+                }
+            }
+            Expr::RatLit(x) => {
+                if match o {
+                    MpCond::Neg => x < &(0 as u64),
+                    MpCond::Zero => x == &(0 as u64),
+                } {
+                    run_code(e, j)
+                } else {
+                    run_code(e, k)
+                }
+            }
+            _ => Err(LfscError::Misc("non mp in NpCond")),
+        },
+        Code::Match(disc, cases) => {
+            let d = Expr::deref_holes(run_code(e, disc)?);
+            //println!("  Matching on: {:?}", d);
+            for (pat, v) in cases.iter() {
+                match pat {
+                    Pattern::Default => return run_code(e, v),
+                    Pattern::Const(s) => {
+                        if Expr::unify(e.expr_value(&s)?.clone(), d.clone()).is_ok() {
+                            return run_code(e, v);
+                        }
+                    }
+                    Pattern::App(head_name, vars) => {
+                        let phead = e.expr_value(&head_name)?;
+                        if let Expr::App(dhead, dargs) = d.as_ref() {
+                            if Expr::unify(phead.clone(), dhead.clone()).is_ok() {
+                                if dargs.len() == vars.len() {
+                                    let unbinds: Vec<_> = vars
+                                        .iter()
+                                        .zip(dargs.iter())
+                                        .map(|(name, a)| {
+                                            e.bind_expr(name.clone(), a.clone(), e.bot.clone())
+                                        })
+                                        .collect();
+                                    let r = run_code(e, v)?;
+                                    for (u, n) in unbinds.into_iter().zip(vars.iter()) {
+                                        e.unbind(&n, u);
+                                    }
+                                    return Ok(r);
+                                } else {
+                                    return Err(LfscError::Misc("Wrong number of pat bindings"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(LfscError::Misc("No matching pattern"))
+        }
+        Code::Mark(n, i) => {
+            let v = run_code(e, i)?;
+            Expr::toggle_mark(v.clone(), *n)?;
+            Ok(v)
+        }
+        Code::IfMarked(n, c, t, f) => {
+            let cond = run_code(e, c)?;
+            if Expr::get_mark(cond, *n)? {
+                run_code(e, t)
+            } else {
+                run_code(e, f)
+            }
+        }
+        Code::Expr(e) => Ok(e.clone()),
+    }
 }
 
 fn cons_type_app(
@@ -454,19 +633,23 @@ fn cons_type_app(
     let mut args = Vec::new();
 
     while Some(Token::Close) != ts.peek() || ty.is_pi_run() {
+        eprintln!("Applying: {}", ty);
         match &*ty {
             &Expr::Pi {
                 ref dom,
                 ref rng,
                 ref var,
             } => {
+                eprintln!("  App: {}", var);
                 if let Expr::Run(ref term, ref var, ref term_ty) = **dom {
                     let res = run_code(e, term)?;
-                    let b = e.expr_binding(&var)?;
-                    same_2_types(&b.ty, term_ty)?;
-                    if &b.val != &res {
-                        return Err(LfscError::RunWrongResult(res, b.val.clone()));
+                    println!("Run res: {}", res);
+                    let expected = run_code(e, &Code::Expr(var.clone()))?;
+                    println!("Expected res: {}", expected);
+                    if Expr::unify(res, expected).is_err() {
+                        return Err(LfscError::Misc("Run wrong result"));
                     }
+                    ty = rng.clone();
                 } else {
                     let arg = cons_check(ts, e, dom.clone())?;
                     ty = Expr::sub(rng, var, &arg);
@@ -477,6 +660,7 @@ fn cons_type_app(
         }
     }
     ts.consume_tok(Token::Close)?;
+    println!("Done app");
     Ok((Rc::new(Expr::App(fun, args)), ty))
 }
 
@@ -487,10 +671,7 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
         Token::Mpz => Ok((Rc::new(Expr::NatTy), Rc::new(Expr::Type))),
         Token::Mpq => Ok((Rc::new(Expr::RatTy), Rc::new(Expr::Type))),
         Token::Natural => Ok((Rc::new(Expr::NatLit(ts.nat())), Rc::new(Expr::NatTy))),
-        Token::Rational => {
-            let (n, d) = ts.rat();
-            Ok((Rc::new(Expr::new_rat(n, d)), Rc::new(Expr::RatTy)))
-        }
+        Token::Rational => Ok((Rc::new(Expr::RatLit(ts.rat())), Rc::new(Expr::RatTy))),
         Token::Hole => Ok((Rc::new(Expr::new_hole()), Rc::new(Expr::new_hole()))),
         Ident => {
             let n = from_utf8(ts.slice()).unwrap();
@@ -505,7 +686,7 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
                 let (t, ty) = cons_type(ts, e)?;
                 mp_type(&ty)?;
                 ts.consume_tok(Close)?;
-                (Rc::new(Expr::MpNeg(t)), ty)
+                (Rc::new(t.mp_neg()?), ty)
             }),
             ReverseSolidus => Err(LfscError::UnascribedLambda),
             Ident => {
@@ -515,7 +696,8 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
             Caret => {
                 let run_expr = parse_term(ts)?;
                 let ty = type_code(&run_expr, e)?;
-                let run_res = consume_var(ts)?;
+                let run_res = cons_check(ts, e, ty.clone())?;
+                //let run_res = consume_var(ts)?;
                 ts.consume_tok(Close)?;
                 Ok((
                     Rc::new(Expr::Run(run_expr, run_res, ty)),
@@ -529,23 +711,24 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
 }
 
 fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-    //println!("Ex: {}", ex_ty);
+    println!("Ex: {}", ex_ty);
     match cons_type(ts, e) {
         Ok((val, ty)) => {
-            let t = Expr::unify(ty, ex_ty)?;
-            //println!(" => {}", t);
+            println!(" => {}", ty);
+            let _t = Expr::unify(ty, ex_ty)?;
             Ok(val)
         }
         Err(LfscError::UnascribedLambda) => {
             if let &Expr::Pi {
-                ref dom,
-                ref rng,
-                ..
+                ref dom, ref rng, ..
             } = ex_ty.as_ref()
             {
                 let var = consume_var(ts)?;
-                let old_binding =
-                    e.bind_expr((*var).clone(), Rc::new(Expr::Var(var.clone())), dom.clone());
+                let old_binding = e.bind_expr(
+                    (*var).clone(),
+                    Rc::new(Expr::new_var(var.clone())),
+                    dom.clone(),
+                );
                 let res = cons_check(ts, e, rng.clone())?;
                 ts.consume_tok(Token::Close)?;
                 e.unbind(&var, old_binding);
@@ -574,7 +757,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
                 let (arg_name, arg_ty) = check_arg(ts, e)?;
                 let old = e.bind_expr(
                     arg_name.clone(),
-                    Rc::new(Expr::Var(Rc::new(arg_name.clone()))),
+                    Rc::new(Expr::new_var(Rc::new(arg_name.clone()))),
                     arg_ty.clone(),
                 );
                 unbinds.push((arg_name.clone(), old));
@@ -593,7 +776,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
     });
     e.bind_expr(
         (*name).clone(),
-        Rc::new(Expr::Var(name.clone())),
+        Rc::new(Expr::new_var(name.clone())),
         pgm_ty.clone(),
     );
     let body = parse_term(ts)?;
@@ -602,7 +785,11 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
     for (n, ub) in unbinds {
         e.unbind(&n, ub);
     }
-    let pgm = Program { args, ret_ty, body };
+    let pgm = Program {
+        args,
+        ret_ty,
+        body: Rc::new(body),
+    };
     e.types.insert(
         (*name).clone(),
         EnvEntry::Program(PgmEnvEntry {
@@ -626,7 +813,7 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
             let ty = type_code(val, e)?;
             let o = e.bind_expr(
                 name.to_owned(),
-                Rc::new(Expr::Var(Rc::new(name.to_owned()))),
+                Rc::new(Expr::new_var(Rc::new(name.to_owned()))),
                 ty,
             );
             let r = type_code(body, e)?;
@@ -706,7 +893,7 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
                                 {
                                     let o = e.bind_expr(
                                         v.clone(),
-                                        Rc::new(Expr::Var(Rc::new(v.clone()))),
+                                        Rc::new(Expr::new_var(Rc::new(v.clone()))),
                                         dom.clone(),
                                     );
                                     // TODO check for non-dependence
@@ -724,6 +911,7 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
                 .collect::<Result<Vec<_>, _>>()?;
             same_types(tys.into_iter())
         }
+        Code::Expr(_) => unimplemented!("Cannot type the expression for of code"),
     }
 }
 
@@ -743,7 +931,7 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
             if *kind != Expr::Type && *kind != Expr::Kind {
                 return Err(LfscError::BadDeclare((*name).clone(), ty, kind));
             }
-            e.bind_expr((*name).clone(), Rc::new(Expr::Var(name)), ty);
+            e.bind_expr((*name).clone(), Rc::new(Expr::new_var(name)), ty);
         }
         Define => {
             let name = consume_var(ts)?;

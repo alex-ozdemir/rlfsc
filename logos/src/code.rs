@@ -1,8 +1,12 @@
 use std::convert::From;
 use std::str::FromStr;
+use std::rc::Rc;
 use thiserror::Error;
 
+use rug::{Integer, Rational};
+
 use crate::token::{Lexer, Token, TokenError};
+use crate::Expr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern {
@@ -25,12 +29,13 @@ pub enum Code {
     Cond(Cond, Box<Code>, Box<Code>, Box<Code>, Box<Code>),
     NatToRat(Box<Code>),
     Var(String),
-    NatLit(u64),
-    RatLit(u64, u64),
+    NatLit(Integer),
+    RatLit(Rational),
     App(String, Vec<Code>),
+    Expr(Rc<Expr>),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum MpBinOp {
     Add,
     Mul,
@@ -48,7 +53,7 @@ impl From<Token> for MpBinOp {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum MpCond {
     Neg,
     Zero,
@@ -64,7 +69,7 @@ impl From<Token> for MpCond {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Copy)]
 pub enum Cond {
     Equal,
     LessThan,
@@ -76,6 +81,30 @@ impl From<Token> for Cond {
             Token::IfEqual => Cond::Equal,
             Token::Compare => Cond::LessThan,
             _ => panic!("Not condition: {:?}", other),
+        }
+    }
+}
+
+impl Code {
+    pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
+        println!("Sub: {:?} {} {}", self, name, value);
+        match self {
+            &Code::Var(ref name_) => {
+                if name == &**name_ {
+                    Code::Expr(value.clone())
+                } else {
+                    self.clone()
+                }
+            }
+            &Code::App(ref f, ref args) if f != name=> Code::App(
+                f.clone(),
+                args.iter().map(|a| Code::sub(a, name, value)).collect(),
+            ),
+            &Code::MpNeg(ref f) => Code::MpNeg(
+                Box::new(Code::sub(f, name, value)),
+            ),
+            &Code::Expr(ref r) => Code::Expr(Expr::sub(r, name, value)),
+            _ => todo!(),
         }
     }
 }
@@ -103,10 +132,7 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
     match ts.require_next()? {
         Ident => Ok(Code::Var(ts.string())),
         Natural => Ok(Code::NatLit(ts.nat())),
-        Rational => {
-            let (n, d) = ts.rat();
-            Ok(Code::RatLit(n, d))
-        }
+        Rational => Ok(Code::RatLit(ts.rat())),
         Open => {
             let nxt = ts.require_next()?;
             let r = match nxt {
@@ -127,7 +153,11 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                     while Some(Close) != ts.peek() {
                         cases.push(parse_case(ts)?);
                     }
-                    Ok(Code::Match(Box::new(disc), cases))
+                    if cases.len() == 0 {
+                        Err(CodeParseError::EmptyMatch)
+                    } else {
+                        Ok(Code::Match(Box::new(disc), cases))
+                    }
                 }
                 Fail => Ok(Code::Fail(Box::new(parse_term(ts)?))),
                 MpAdd | MpMul | MpDiv => Ok(Code::MpBin(
@@ -213,3 +243,4 @@ fn parse_case(ts: &mut Lexer) -> Result<(Pattern, Code), CodeParseError> {
     ts.consume_tok(Token::Close)?;
     Ok((r, val))
 }
+

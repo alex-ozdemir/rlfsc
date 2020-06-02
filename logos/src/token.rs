@@ -1,6 +1,8 @@
 use logos::{self, Logos};
-use std::str::{from_utf8, FromStr};
+use std::str::from_utf8;
 use thiserror::Error;
+
+use rug::{Integer, Rational};
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
 pub enum Token {
@@ -129,11 +131,11 @@ impl<'a> Lexer<'a> {
     pub fn next(&mut self) -> Option<Token> {
         self.peek_slice = self.inner.slice();
         let n = std::mem::replace(&mut self.peek, self.inner.next());
-                //println!(
-                //    "Token: {:?}, Slice: {:?}",
-                //    n,
-                //    from_utf8(self.peek_slice).unwrap()
-                //);
+        println!(
+            "Token: {:?}, Slice: {:?}",
+            n,
+            from_utf8(self.peek_slice).unwrap()
+        );
         n
     }
     pub fn require_next(&mut self) -> Result<Token, TokenError> {
@@ -151,15 +153,11 @@ impl<'a> Lexer<'a> {
     pub fn string(&self) -> String {
         self.str().to_owned()
     }
-    pub fn nat(&self) -> u64 {
-        u64::from_str(self.str()).unwrap()
+    pub fn nat(&self) -> Integer {
+        Integer::from_str_radix(self.str(), 10).unwrap()
     }
-    pub fn rat(&self) -> (u64, u64) {
-        let s = self.str();
-        let i = s.find("/").unwrap();
-        let n = u64::from_str(&s[..i]).unwrap();
-        let d = u64::from_str(&s[i + 1..]).unwrap();
-        (n, d)
+    pub fn rat(&self) -> Rational {
+        Rational::from_str_radix(self.str(), 10).unwrap()
     }
     pub fn consume_tok(&mut self, t: Token) -> Result<(), TokenError> {
         let f = self.require_next()?;
