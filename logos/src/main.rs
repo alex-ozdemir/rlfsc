@@ -88,7 +88,7 @@ impl From<CodeParseError> for LfscError {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Expr {
+pub enum Expr {
     Bot,
     Type,
     Kind,
@@ -96,7 +96,8 @@ enum Expr {
     NatLit(Integer),
     RatTy,
     RatLit(Rational),
-    Var(Rc<String>, Cell<u32>),
+    DeclaredSymbol(u64, String, Cell<u32>),
+    Var(Rc<String>),
     /// eval expression, name, type
     Run(Code, Rc<Expr>, Rc<Expr>),
     Pi {
@@ -120,8 +121,21 @@ impl Display for Expr {
             RatTy => write!(f, "mpq"),
             NatLit(u) => write!(f, "{}", u),
             RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
-            Var(s, m) => write!(f, "{}[{:b}]", s, m.get()),
-            Run(c, n, e) => write!(f, "(^ ({:?} {}) {})", c, n, e),
+            Var(s) => write!(f, "{}", s),
+            DeclaredSymbol(id, s, marks) => {
+                write!(f, "{}{{{}}}", s, id)?;
+                if marks.get() != 0 {
+                    f.debug_list()
+                        .entries(
+                            (0..31)
+                                .filter(|i| (1u32 << i) & marks.get() != 0)
+                                .map(|i| i + 1),
+                        )
+                        .finish()?;
+                }
+                Ok(())
+            }
+            Run(c, n, e) => write!(f, "(^ ({} {}) {})", c, n, e),
             Pi { var, dom, rng } => write!(f, "(! {} {} {})", var, dom, rng),
             App(head, tail) => {
                 write!(f, "({}", head)?;
@@ -132,7 +146,7 @@ impl Display for Expr {
             }
             Hole(c) => {
                 if let Some(r) = c.borrow().as_ref() {
-                    write!(f, "{}", r)
+                    write!(f, "_{}", r)
                 } else {
                     write!(f, "_")
                 }
@@ -158,7 +172,7 @@ impl Expr {
     }
 
     fn new_var(s: Rc<String>) -> Expr {
-        Expr::Var(s, Cell::new(0))
+        Expr::Var(s)
     }
 
     fn deref_holes(mut r: Rc<Self>) -> Rc<Expr> {
@@ -201,46 +215,10 @@ impl Expr {
         }
     }
 
-    fn unify(a: Rc<Self>, b: Rc<Self>) -> Result<Rc<Self>, LfscError> {
-        if a == b {
-            Ok(a.clone())
-        } else {
-            //println!("Unify: {} {}", a, b);
-            let aa = Expr::deref_holes(a).clone();
-            let bb = Expr::deref_holes(b).clone();
-            Ok((match (aa.as_ref(), bb.as_ref()) {
-                (Expr::Hole(_), Expr::Hole(_)) => Err(LfscError::Misc("two holes in unify")),
-                (Expr::Hole(i), _) => {
-                    i.replace(Some(bb));
-                    Ok(aa)
-                }
-                (_, Expr::Hole(i)) => {
-                    i.replace(Some(aa));
-                    Ok(bb)
-                }
-                (Expr::Bot, _) => Ok(aa),
-                (_, Expr::Bot) => Ok(bb),
-                (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
-                    if a_args.len() == b_args.len() {
-                        Expr::unify(a_f.clone(), b_f.clone())?;
-                        for (x, y) in a_args.iter().cloned().zip(b_args.iter().cloned()) {
-                            Expr::unify(x, y)?;
-                        }
-                        Ok(aa)
-                    } else {
-                        Err(LfscError::AppArgcMismatch((*aa).clone(), (*bb).clone()))
-                    }
-                }
-                (Expr::Var(x, _), Expr::Var(y, _)) if x == y => Ok(aa),
-                _ => Err(LfscError::TypeMismatch(aa.clone(), bb.clone())),
-            })?)
-        }
-    }
-
     fn sub(this: &Rc<Self>, name: &str, value: &Rc<Expr>) -> Rc<Self> {
         use Expr::*;
         match this.as_ref() {
-            &Var(ref name_, _) => {
+            &Var(ref name_) => {
                 if name == &**name_ {
                     value.clone()
                 } else {
@@ -272,27 +250,6 @@ impl Expr {
                 }
             }
             _ => this.clone(),
-        }
-    }
-    pub fn toggle_mark(this: Rc<Self>, m: u8) -> Result<(), LfscError> {
-        debug_assert!(m <= 32 && m >= 1);
-        let t = Expr::deref_holes(this.clone());
-        if let Expr::Var(_, ref marks) = t.as_ref() {
-            marks.set((1u32 << (m - 1)) ^ marks.get());
-            println!("Post mark: {} {}", m, t);
-            Ok(())
-        } else {
-            Err(LfscError::CannotMark((*this).clone()))
-        }
-    }
-    pub fn get_mark(this: Rc<Self>, m: u8) -> Result<bool, LfscError> {
-        debug_assert!(m <= 32 && m >= 1);
-        let t = Expr::deref_holes(this.clone());
-        println!("Get mark: {} {}", m, t);
-        if let Expr::Var(_, ref marks) = t.as_ref() {
-            Ok((1u32 << (m - 1)) & marks.get() != 0)
-        } else {
-            Err(LfscError::CannotMark((*this).clone()))
         }
     }
 }
@@ -339,6 +296,7 @@ struct Env {
     nat: Rc<Expr>,
     rat: Rc<Expr>,
     bot: Rc<Expr>,
+    next_symbol: u64,
 }
 
 impl Default for Env {
@@ -350,6 +308,7 @@ impl Default for Env {
             nat: Rc::new(Expr::NatTy),
             rat: Rc::new(Expr::RatTy),
             bot: Rc::new(Expr::Bot),
+            next_symbol: 0,
         }
     }
 }
@@ -390,6 +349,99 @@ impl Env {
         match self.binding(name)? {
             EnvEntry::Expr(ref e) => Ok(&e.ty),
             EnvEntry::Program(ref e) => Ok(&e.ty),
+        }
+    }
+    fn deref(&self, mut r: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
+        loop {
+            let next = match r.as_ref() {
+                Expr::Hole(ref o) => {
+                    if let Some(a) = o.borrow().as_ref() {
+                        a.clone()
+                    } else {
+                        break;
+                    }
+                }
+                Expr::Var(s) => {
+                    let ref_ = self.expr_value(&s)?;
+                    if ref_ == &r {
+                        break;
+                    } else {
+                        ref_.clone()
+                    }
+                }
+                _ => break,
+            };
+            r = next;
+        }
+        Ok(r)
+    }
+    pub fn toggle_mark(&self, e: Rc<Expr>, m: u8) -> Result<Rc<Expr>, LfscError> {
+        debug_assert!(m <= 32 && m >= 1);
+        let d = self.deref(e)?;
+        match d.as_ref() {
+            Expr::DeclaredSymbol(_, _, marks) => {
+                marks.set((1u32 << (m - 1)) ^ marks.get());
+            }
+            _ => return Err(LfscError::CannotMark((*d).clone())),
+        }
+        return Ok(d);
+    }
+    pub fn get_mark(&self, e: Rc<Expr>, m: u8) -> Result<bool, LfscError> {
+        debug_assert!(m <= 32 && m >= 1);
+        let d = self.deref(e)?;
+        match d.as_ref() {
+            Expr::DeclaredSymbol(_, _, marks) => {
+                let r = (1u32 << (m - 1)) & marks.get() != 0;
+                Ok(r)
+            }
+            _ => Err(LfscError::CannotMark((*d).clone())),
+        }
+    }
+    fn new_symbol(&mut self, s: String) -> Expr {
+        self.next_symbol += 1;
+        Expr::DeclaredSymbol(self.next_symbol - 1, s, Cell::new(0))
+    }
+    fn unify(&self, a: Rc<Expr>, b: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
+        if a == b {
+            Ok(a.clone())
+        } else {
+            let aa = self.deref(a)?;
+            let bb = self.deref(b)?;
+            Ok((match (aa.as_ref(), bb.as_ref()) {
+                (Expr::Hole(_), Expr::Hole(_)) => Err(LfscError::Misc("two holes in unify")),
+                (Expr::Hole(i), _) => {
+                    i.replace(Some(bb));
+                    Ok(aa)
+                }
+                (_, Expr::Hole(i)) => {
+                    i.replace(Some(aa));
+                    Ok(bb)
+                }
+                (Expr::Bot, _) => Ok(aa),
+                (_, Expr::Bot) => Ok(bb),
+                (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
+                    if a_args.len() == b_args.len() {
+                        self.unify(a_f.clone(), b_f.clone())?;
+                        for (x, y) in a_args.iter().cloned().zip(b_args.iter().cloned()) {
+                            self.unify(x, y)?;
+                        }
+                        Ok(aa)
+                    } else {
+                        Err(LfscError::AppArgcMismatch((*aa).clone(), (*bb).clone()))
+                    }
+                }
+                (Expr::DeclaredSymbol(x, _, _), Expr::DeclaredSymbol(y, _, _)) if x == y => Ok(aa),
+                (Expr::Var(x), Expr::Var(y)) if x == y => Ok(aa),
+                _ => Err(LfscError::TypeMismatch(aa.clone(), bb.clone())),
+            })?)
+        }
+    }
+    fn unify_all(&self, tys: impl IntoIterator<Item = Rc<Expr>>) -> Result<Rc<Expr>, LfscError> {
+        let mut non_fails = tys.into_iter();
+        if let Some(first) = non_fails.next() {
+            non_fails.try_fold(first, |a, b| self.unify(a, b))
+        } else {
+            Err(LfscError::NoCases)
         }
     }
 }
@@ -443,7 +495,8 @@ fn cons_type_ascription(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Exp
 fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_var(ts)?;
     let ty = cons_check(ts, e, e.type_.clone())?;
-    let old_binding = e.bind_expr((*var).clone(), Rc::new(Expr::new_var(var.clone())), ty);
+    let sym = Rc::new(e.new_symbol((*var).clone()));
+    let old_binding = e.bind_expr((*var).clone(), sym, ty);
     let (v, t) = cons_type(ts, e)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
@@ -458,23 +511,9 @@ fn mp_type<'a>(a: &Expr) -> Result<(), LfscError> {
     }
 }
 
-fn same_2_types(a: &Rc<Expr>, b: &Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-    same_types(std::iter::once(a.clone()).chain(std::iter::once(b.clone())))
-}
-
-fn same_types(tys: impl IntoIterator<Item = Rc<Expr>>) -> Result<Rc<Expr>, LfscError> {
-    let mut non_fails = tys.into_iter();
-    if let Some(first) = non_fails.next() {
-        non_fails.try_fold(first, Expr::unify)
-    } else {
-        Err(LfscError::NoCases)
-    }
-}
-
 fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
-    eprintln!("Run: {:?}", code);
     match code {
-        Code::Var(s) => Ok(e.expr_value(&s)?.clone()),
+        Code::Var(s) => Ok(e.deref(e.expr_value(&s)?.clone())?),
         Code::App(ref fn_name, ref arg_terms) => {
             let args = arg_terms
                 .iter()
@@ -569,19 +608,18 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
         },
         Code::Match(disc, cases) => {
             let d = Expr::deref_holes(run_code(e, disc)?);
-            //println!("  Matching on: {:?}", d);
             for (pat, v) in cases.iter() {
                 match pat {
                     Pattern::Default => return run_code(e, v),
                     Pattern::Const(s) => {
-                        if Expr::unify(e.expr_value(&s)?.clone(), d.clone()).is_ok() {
+                        if e.unify(e.expr_value(&s)?.clone(), d.clone()).is_ok() {
                             return run_code(e, v);
                         }
                     }
                     Pattern::App(head_name, vars) => {
                         let phead = e.expr_value(&head_name)?;
                         if let Expr::App(dhead, dargs) = d.as_ref() {
-                            if Expr::unify(phead.clone(), dhead.clone()).is_ok() {
+                            if e.unify(phead.clone(), dhead.clone()).is_ok() {
                                 if dargs.len() == vars.len() {
                                     let unbinds: Vec<_> = vars
                                         .iter()
@@ -607,18 +645,23 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
         }
         Code::Mark(n, i) => {
             let v = run_code(e, i)?;
-            Expr::toggle_mark(v.clone(), *n)?;
-            Ok(v)
+            e.toggle_mark(v.clone(), *n)
         }
         Code::IfMarked(n, c, t, f) => {
             let cond = run_code(e, c)?;
-            if Expr::get_mark(cond, *n)? {
+            if e.get_mark(cond, *n)? {
                 run_code(e, t)
             } else {
                 run_code(e, f)
             }
         }
-        Code::Expr(e) => Ok(e.clone()),
+        Code::Expr(ex) => {
+            let r = e.deref(ex.clone())?;
+            match r.as_ref() {
+                &Expr::Hole(_) => Err(LfscError::Misc("Unfilled hole in code!")),
+                _ => Ok(r),
+            }
+        }
     }
 }
 
@@ -633,21 +676,16 @@ fn cons_type_app(
     let mut args = Vec::new();
 
     while Some(Token::Close) != ts.peek() || ty.is_pi_run() {
-        eprintln!("Applying: {}", ty);
         match &*ty {
             &Expr::Pi {
                 ref dom,
                 ref rng,
                 ref var,
             } => {
-                eprintln!("  App: {}", var);
-                if let Expr::Run(ref term, ref var, ref term_ty) = **dom {
+                if let Expr::Run(ref term, ref expected, ref term_ty) = **dom {
                     let res = run_code(e, term)?;
-                    println!("Run res: {}", res);
-                    let expected = run_code(e, &Code::Expr(var.clone()))?;
-                    println!("Expected res: {}", expected);
-                    if Expr::unify(res, expected).is_err() {
-                        return Err(LfscError::Misc("Run wrong result"));
+                    if e.unify(res.clone(), expected.clone()).is_err() {
+                        return Err(LfscError::RunWrongResult(res, expected.clone()));
                     }
                     ty = rng.clone();
                 } else {
@@ -660,7 +698,6 @@ fn cons_type_app(
         }
     }
     ts.consume_tok(Token::Close)?;
-    println!("Done app");
     Ok((Rc::new(Expr::App(fun, args)), ty))
 }
 
@@ -711,29 +748,25 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
 }
 
 fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-    println!("Ex: {}", ex_ty);
-    match cons_type(ts, e) {
+    let r = match cons_type(ts, e) {
         Ok((val, ty)) => {
-            println!(" => {}", ty);
-            let _t = Expr::unify(ty, ex_ty)?;
+            let _t = e.unify(ty, ex_ty.clone())?;
             Ok(val)
         }
         Err(LfscError::UnascribedLambda) => {
             if let &Expr::Pi {
-                ref dom, ref rng, ..
+                ref dom, ref rng, ref var
             } = ex_ty.as_ref()
             {
-                let var = consume_var(ts)?;
-                let old_binding = e.bind_expr(
-                    (*var).clone(),
-                    Rc::new(Expr::new_var(var.clone())),
-                    dom.clone(),
-                );
-                let res = cons_check(ts, e, rng.clone())?;
+                let act_var = consume_var(ts)?;
+                let sym = Rc::new(e.new_symbol((*act_var).clone()));
+                let new_expected = Expr::sub(rng, &var, &sym);
+                let old_binding = e.bind_expr((*act_var).clone(), sym, dom.clone());
+                let res = cons_check(ts, e, new_expected)?;
                 ts.consume_tok(Token::Close)?;
-                e.unbind(&var, old_binding);
+                e.unbind(&act_var, old_binding);
                 Ok(Rc::new(Expr::Pi {
-                    var,
+                    var: var.clone(),
                     dom: dom.clone(),
                     rng: res,
                 }))
@@ -742,7 +775,8 @@ fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, 
             }
         }
         Err(e) => Err(e),
-    }
+    };
+    r
 }
 
 fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
@@ -781,7 +815,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
     );
     let body = parse_term(ts)?;
     let body_ty = type_code(&body, e)?;
-    Expr::unify(body_ty, ret_ty.clone())?;
+    e.unify(body_ty, ret_ty.clone())?;
     for (n, ub) in unbinds {
         e.unbind(&n, ub);
     }
@@ -806,7 +840,8 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
         Code::NatLit(_) => Ok(e.nat.clone()),
         Code::RatLit(..) => Ok(e.rat.clone()),
         Code::NatToRat(ref i) => {
-            Expr::unify(e.nat.clone(), type_code(&i, e)?)?;
+            let c = type_code(&i, e)?;
+            e.unify(e.nat.clone(), c)?;
             Ok(e.rat.clone())
         }
         Code::Let(ref name, ref val, ref body) => {
@@ -820,7 +855,11 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
             e.unbind(name, o);
             Ok(r)
         }
-        Code::IfMarked(_, _, ref tr, ref fa) => Expr::unify(type_code(tr, e)?, type_code(fa, e)?),
+        Code::IfMarked(_, _, ref tr, ref fa) => {
+            let a = type_code(tr, e)?;
+            let b = type_code(fa, e)?;
+            e.unify(a, b)
+        }
         Code::Mark(_, ref v) => type_code(v, e),
         Code::Do(ref init, ref last) => {
             for i in init {
@@ -829,13 +868,17 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
             type_code(last, e)
         }
         Code::MpBin(_, ref a, ref b) => {
-            let ty = Expr::unify(type_code(a, e)?, type_code(b, e)?)?;
+            let a = type_code(a, e)?;
+            let b = type_code(b, e)?;
+            let ty = e.unify(a, b)?;
             mp_type(&ty)?;
             Ok(ty)
         }
         Code::MpCond(_, ref c, ref tr, ref fa) => {
             mp_type(type_code(c, e)?.as_ref())?;
-            Expr::unify(type_code(tr, e)?, type_code(fa, e)?)
+            let a = type_code(tr, e)?;
+            let b = type_code(fa, e)?;
+            e.unify(a, b)
         }
         Code::MpNeg(ref i) => {
             let ty = type_code(i, e)?;
@@ -844,12 +887,16 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
         }
         Code::Fail(ref i) => {
             let ty = type_code(i, e)?;
-            Expr::unify(ty, e.type_.clone())?;
+            e.unify(ty, e.type_.clone())?;
             Ok(e.bot.clone())
         }
         Code::Cond(_, ref a, ref b, ref tr, ref fa) => {
-            Expr::unify(type_code(a, e)?, type_code(b, e)?)?;
-            Expr::unify(type_code(tr, e)?, type_code(fa, e)?)
+            let a_ty = type_code(a, e)?;
+            let b_ty = type_code(b, e)?;
+            e.unify(a_ty, b_ty)?;
+            let tr_ty = type_code(tr, e)?;
+            let fa_ty = type_code(fa, e)?;
+            e.unify(tr_ty, fa_ty)
         }
         Code::App(ref fn_name, ref args) => {
             let mut ty = e.ty(fn_name)?.clone();
@@ -864,7 +911,7 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
                     ref var,
                 } = ty.as_ref()
                 {
-                    Expr::unify(a.clone(), dom.clone())?;
+                    e.unify(a.clone(), dom.clone())?;
                     ty = Expr::sub(&rng, var.as_ref().as_str(), &a);
                 } else {
                     return Err(LfscError::UntypableApplication(ty.clone()));
@@ -880,7 +927,7 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
                     match pat {
                         Pattern::Default => type_code(val, e),
                         Pattern::Const(ref n) => {
-                            Expr::unify(e.ty(n)?.clone(), disc_ty.clone())?;
+                            e.unify(e.ty(n)?.clone(), disc_ty.clone())?;
                             type_code(val, e)
                         }
                         Pattern::App(ref n, ref vars) => {
@@ -903,13 +950,13 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
                                     return Err(LfscError::NonPiPatternHead);
                                 }
                             }
-                            Expr::unify(ty, disc_ty.clone())?;
+                            e.unify(ty, disc_ty.clone())?;
                             type_code(val, e)
                         }
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            same_types(tys.into_iter())
+            e.unify_all(tys.into_iter())
         }
         Code::Expr(_) => unimplemented!("Cannot type the expression for of code"),
     }
@@ -931,7 +978,8 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
             if *kind != Expr::Type && *kind != Expr::Kind {
                 return Err(LfscError::BadDeclare((*name).clone(), ty, kind));
             }
-            e.bind_expr((*name).clone(), Rc::new(Expr::new_var(name)), ty);
+            let sym = Rc::new(e.new_symbol((*name).clone()));
+            e.bind_expr((*name).clone(), sym, ty);
         }
         Define => {
             let name = consume_var(ts)?;
@@ -968,9 +1016,7 @@ fn main() -> Result<(), LfscError> {
     let mut env = Env::default();
     //    do_cmds(&mut lexer, &mut env)?;
     if let Err(e) = do_cmds(&mut lexer, &mut env) {
-        //println!("Error {:#?}", e);
         println!("Error {}", e);
-        //println!("Error");
     }
     Ok(())
 }

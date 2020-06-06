@@ -1,6 +1,7 @@
 use std::convert::From;
-use std::str::FromStr;
+use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
+use std::str::FromStr;
 use thiserror::Error;
 
 use rug::{Integer, Rational};
@@ -87,7 +88,6 @@ impl From<Token> for Cond {
 
 impl Code {
     pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
-        println!("Sub: {:?} {} {}", self, name, value);
         match self {
             &Code::Var(ref name_) => {
                 if name == &**name_ {
@@ -96,13 +96,11 @@ impl Code {
                     self.clone()
                 }
             }
-            &Code::App(ref f, ref args) if f != name=> Code::App(
+            &Code::App(ref f, ref args) if f != name => Code::App(
                 f.clone(),
                 args.iter().map(|a| Code::sub(a, name, value)).collect(),
             ),
-            &Code::MpNeg(ref f) => Code::MpNeg(
-                Box::new(Code::sub(f, name, value)),
-            ),
+            &Code::MpNeg(ref f) => Code::MpNeg(Box::new(Code::sub(f, name, value))),
             &Code::Expr(ref r) => Code::Expr(Expr::sub(r, name, value)),
             _ => todo!(),
         }
@@ -214,7 +212,10 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                     }
                     Ok(Code::App(fun_name, args))
                 }
-                t => Err(CodeParseError::from(TokenError::UnexpectedToken("term head", t))),
+                t => Err(CodeParseError::from(TokenError::UnexpectedToken(
+                    "term head",
+                    t,
+                ))),
             }?;
             ts.consume_tok(Token::Close)?;
             Ok(r)
@@ -237,10 +238,93 @@ fn parse_case(ts: &mut Lexer) -> Result<(Pattern, Code), CodeParseError> {
         }
         Token::Ident => Ok(Pattern::Const(ts.string())),
         Token::Default => Ok(Pattern::Default),
-        t => Err(CodeParseError::from(CodeParseError::UnexpectedToken("case", t))),
+        t => Err(CodeParseError::from(CodeParseError::UnexpectedToken(
+            "case", t,
+        ))),
     }?;
     let val = parse_term(ts)?;
     ts.consume_tok(Token::Close)?;
     Ok((r, val))
 }
 
+impl Display for Pattern {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Pattern::Default => write!(f, "default"),
+            Pattern::Const(c) => write!(f, "{}", c),
+            Pattern::App(head, tail) => {
+                write!(f, "({}", head)?;
+                for t in tail {
+                    write!(f, " {}", t)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
+impl Display for MpBinOp {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            MpBinOp::Add => write!(f, "mp_add"),
+            MpBinOp::Div => write!(f, "mp_div"),
+            MpBinOp::Mul => write!(f, "mp_mul"),
+        }
+    }
+}
+impl Display for MpCond {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            MpCond::Neg => write!(f, "mp_ifneg"),
+            MpCond::Zero => write!(f, "mp_ifzero"),
+        }
+    }
+}
+impl Display for Cond {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Cond::Equal => write!(f, "ifequal"),
+            Cond::LessThan => write!(f, "compare"),
+        }
+    }
+}
+impl Display for Code {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        use Code::*;
+        match self {
+            Match(c, cs) => {
+                write!(f, "(match {}", c)?;
+                for (p, e) in cs {
+                    write!(f, " ({} {})", p, e)?;
+                }
+                write!(f, ")")
+            }
+            Let(name, v, body) => write!(f, "(let {} {} {})", name, v, body),
+            IfMarked(n, a, b, c) => write!(f, "(ifmarked{} {} {} {})", n, a, b, c),
+            Mark(n, a) => write!(f, "(markvar{} {})", n, a),
+            Do(cs, c) => {
+                write!(f, "(do")?;
+                for x in cs {
+                    write!(f, " {}", x)?;
+                }
+                write!(f, " {})", c)
+            }
+            MpBin(o, a, b) => write!(f, "({} {} {})", o, a, b),
+            MpCond(o, a, b, c) => write!(f, "({} {} {} {})", o, a, b, c),
+            MpNeg(c) => write!(f, "(mp_neg {})", c),
+            Fail(c) => write!(f, "(fail {})", c),
+            Cond(o, a, b, c, d) => write!(f, "({} {} {} {} {})", o, a, b, c, d),
+            NatToRat(c) => write!(f, "(mpz_to_mpq {})", c),
+            Expr(e) => write!(f, "{}", e),
+            NatLit(u) => write!(f, "{}", u),
+            RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
+            Var(s) => write!(f, "{}", s),
+            App(head, tail) => {
+                write!(f, "({}", head)?;
+                for t in tail {
+                    write!(f, " {}", t)?;
+                }
+                write!(f, ")")
+            }
+        }
+    }
+}
