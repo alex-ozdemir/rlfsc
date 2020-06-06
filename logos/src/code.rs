@@ -102,7 +102,14 @@ impl Code {
             ),
             &Code::MpNeg(ref f) => Code::MpNeg(Box::new(Code::sub(f, name, value))),
             &Code::Expr(ref r) => Code::Expr(Expr::sub(r, name, value)),
-            _ => todo!(),
+            &Code::MpBin(o, ref a, ref b) => Code::MpBin(
+                o,
+                Box::new(Code::sub(&a, name, value)),
+                Box::new(Code::sub(&b, name, value)),
+            ),
+            &Code::NatLit(_) => self.clone(),
+            &Code::RatLit(_) => self.clone(),
+            _ => todo!("NYI: sub over {}", self),
         }
     }
 }

@@ -402,38 +402,46 @@ impl Env {
         Expr::DeclaredSymbol(self.next_symbol - 1, s, Cell::new(0))
     }
     fn unify(&self, a: Rc<Expr>, b: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-        if a == b {
+        if Rc::ptr_eq(&a, &b) {
             Ok(a.clone())
         } else {
             let aa = self.deref(a)?;
             let bb = self.deref(b)?;
-            Ok((match (aa.as_ref(), bb.as_ref()) {
-                (Expr::Hole(_), Expr::Hole(_)) => Err(LfscError::Misc("two holes in unify")),
-                (Expr::Hole(i), _) => {
-                    i.replace(Some(bb));
-                    Ok(aa)
-                }
-                (_, Expr::Hole(i)) => {
-                    i.replace(Some(aa));
-                    Ok(bb)
-                }
-                (Expr::Bot, _) => Ok(aa),
-                (_, Expr::Bot) => Ok(bb),
-                (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
-                    if a_args.len() == b_args.len() {
-                        self.unify(a_f.clone(), b_f.clone())?;
-                        for (x, y) in a_args.iter().cloned().zip(b_args.iter().cloned()) {
-                            self.unify(x, y)?;
-                        }
+            if aa == bb {
+                Ok(aa.clone())
+            } else {
+                Ok((match (aa.as_ref(), bb.as_ref()) {
+                    (Expr::Hole(_), Expr::Hole(_)) => Err(LfscError::Misc("two holes in unify")),
+                    (Expr::Hole(i), _) => {
+                        debug_assert!(i.borrow().is_none());
+                        i.replace(Some(bb));
                         Ok(aa)
-                    } else {
-                        Err(LfscError::AppArgcMismatch((*aa).clone(), (*bb).clone()))
                     }
-                }
-                (Expr::DeclaredSymbol(x, _, _), Expr::DeclaredSymbol(y, _, _)) if x == y => Ok(aa),
-                (Expr::Var(x), Expr::Var(y)) if x == y => Ok(aa),
-                _ => Err(LfscError::TypeMismatch(aa.clone(), bb.clone())),
-            })?)
+                    (_, Expr::Hole(i)) => {
+                        debug_assert!(i.borrow().is_none());
+                        i.replace(Some(aa));
+                        Ok(bb)
+                    }
+                    (Expr::Bot, _) => Ok(aa),
+                    (_, Expr::Bot) => Ok(bb),
+                    (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
+                        if a_args.len() == b_args.len() {
+                            self.unify(a_f.clone(), b_f.clone())?;
+                            for (x, y) in a_args.iter().cloned().zip(b_args.iter().cloned()) {
+                                self.unify(x, y)?;
+                            }
+                            Ok(aa)
+                        } else {
+                            Err(LfscError::AppArgcMismatch((*aa).clone(), (*bb).clone()))
+                        }
+                    }
+                    (Expr::DeclaredSymbol(x, _, _), Expr::DeclaredSymbol(y, _, _)) if x == y => {
+                        Ok(aa)
+                    }
+                    (Expr::Var(x), Expr::Var(y)) if x == y => Ok(aa),
+                    _ => Err(LfscError::TypeMismatch(aa.clone(), bb.clone())),
+                })?)
+            }
         }
     }
     fn unify_all(&self, tys: impl IntoIterator<Item = Rc<Expr>>) -> Result<Rc<Expr>, LfscError> {
@@ -755,7 +763,9 @@ fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, 
         }
         Err(LfscError::UnascribedLambda) => {
             if let &Expr::Pi {
-                ref dom, ref rng, ref var
+                ref dom,
+                ref rng,
+                ref var,
             } = ex_ty.as_ref()
             {
                 let act_var = consume_var(ts)?;
