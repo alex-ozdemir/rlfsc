@@ -1,458 +1,25 @@
 #![feature(move_ref_pattern)]
 
 use logos::Logos;
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::convert::{From, Into};
 use std::default::Default;
 use std::env::args;
-use std::fmt::{self, Display, Formatter};
 use std::fs::read;
 use std::rc::Rc;
 use std::str::from_utf8;
 
-use thiserror::Error;
-
 mod code;
+mod env;
+mod error;
+mod expr;
 mod token;
 
-use code::{parse_term, Code, CodeParseError, MpBinOp, MpCond, Pattern};
-use rug::{Integer, Rational};
-use token::{Lexer, Token, TokenError};
-
-#[derive(Debug, PartialEq, Eq)]
-struct Program {
-    args: Vec<(String, Rc<Expr>)>,
-    ret_ty: Rc<Expr>,
-    body: Rc<Code>,
-}
-
-#[derive(Error, Debug)]
-enum LfscError {
-    #[error("Got an unexpected EOF")]
-    UnexpectedEof,
-    #[error("Unknown identifier `{0}`")]
-    UnknownIdentifier(String),
-    #[error("Expect a {0}, but found token `{1:?}`")]
-    UnexpectedToken(&'static str, Token),
-    #[error("A Pi-binding's range must have type 'type' or 'kind', but it has type {0:?}")]
-    InvalidPiRange(Rc<Expr>),
-    #[error("A lambda's type cannot be computed. It must be ascribed.")]
-    UnascribedLambda,
-    #[error("a {0:?} cannot be applied")]
-    UntypableApplication(Rc<Expr>),
-    #[error("`{0:?}` has type `{1:?}`, but was expected to have `{2:?}`")]
-    UnexpectedType(Rc<Expr>, Rc<Expr>, Rc<Expr>),
-    #[error("Expected a command, but got `{0}`")]
-    NotACmd(String),
-    #[error("Identifiers should be declare to have kind type or kind, but {0} was declared to be a `{1:?}`, which has kind `{2:?}`")]
-    BadDeclare(String, Rc<Expr>, Rc<Expr>),
-    #[error("There most be at least one case")]
-    NoCases,
-    #[error("Non-pi pattern head")]
-    NonPiPatternHead,
-    #[error("Types `{0}` and `{1}` do not match")]
-    TypeMismatch(Rc<Expr>, Rc<Expr>),
-    #[error("Run produced `{0:?}`, but was expected to produce `{1:?}`")]
-    RunWrongResult(Rc<Expr>, Rc<Expr>),
-    #[error("Input types to mp_* must be rational or natural, not {0:?}")]
-    BadMqExpr(Rc<Expr>),
-    #[error("Misc error: {0}")]
-    Misc(&'static str),
-    #[error("TokenError: {0}")]
-    TokenError(TokenError),
-    #[error("CodeParseError: {0}")]
-    CodeParseError(CodeParseError),
-    #[error("The identifier {2} is an {1} but should be a {0}")]
-    WrongIdentifierType(&'static str, &'static str, String),
-    #[error("{0:?} cannot be applied to {1} and {2}, because one is not arithmetic")]
-    NotMpInBin(code::MpBinOp, Expr, Expr),
-    #[error("{0} cannot be negated because it is not arithmetic")]
-    NotMpInNeg(Expr),
-    #[error("The applications\n\t{0}\nand\n\t{1}\ncannot be equal because they have different numbers of arguments")]
-    AppArgcMismatch(Expr, Expr),
-    #[error("Cannot mark\n\t{0:?}\nbecause it is not a variable.")]
-    CannotMark(Expr),
-}
-
-impl From<TokenError> for LfscError {
-    fn from(o: TokenError) -> Self {
-        Self::TokenError(o)
-    }
-}
-
-impl From<CodeParseError> for LfscError {
-    fn from(o: CodeParseError) -> Self {
-        Self::CodeParseError(o)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Expr {
-    Bot,
-    Type,
-    Kind,
-    NatTy,
-    NatLit(Integer),
-    RatTy,
-    RatLit(Rational),
-    DeclaredSymbol(u64, String, Cell<u32>),
-    Var(Rc<String>),
-    /// eval expression, name, type
-    Run(Code, Rc<Expr>, Rc<Expr>),
-    Pi {
-        var: Rc<String>,
-        dom: Rc<Expr>,
-        rng: Rc<Expr>,
-    },
-    App(Rc<Expr>, Vec<Rc<Expr>>),
-    /// Arguments, return type, body
-    Hole(RefCell<Option<Rc<Expr>>>),
-}
-
-impl Display for Expr {
-    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        use Expr::*;
-        match self {
-            Bot => write!(f, "_|_"),
-            Type => write!(f, "type"),
-            Kind => write!(f, "kind"),
-            NatTy => write!(f, "mpz"),
-            RatTy => write!(f, "mpq"),
-            NatLit(u) => write!(f, "{}", u),
-            RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
-            Var(s) => write!(f, "{}", s),
-            DeclaredSymbol(id, s, marks) => {
-                write!(f, "{}{{{}}}", s, id)?;
-                if marks.get() != 0 {
-                    f.debug_list()
-                        .entries(
-                            (0..31)
-                                .filter(|i| (1u32 << i) & marks.get() != 0)
-                                .map(|i| i + 1),
-                        )
-                        .finish()?;
-                }
-                Ok(())
-            }
-            Run(c, n, e) => write!(f, "(^ ({} {}) {})", c, n, e),
-            Pi { var, dom, rng } => write!(f, "(! {} {} {})", var, dom, rng),
-            App(head, tail) => {
-                write!(f, "({}", head)?;
-                for t in tail {
-                    write!(f, " {}", t)?;
-                }
-                write!(f, ")")
-            }
-            Hole(c) => {
-                if let Some(r) = c.borrow().as_ref() {
-                    write!(f, "_{}", r)
-                } else {
-                    write!(f, "_")
-                }
-            }
-        }
-    }
-}
-
-impl Expr {
-    fn is_pi_run(&self) -> bool {
-        if let Expr::Pi { dom, .. } = &self {
-            match **dom {
-                Expr::Run(..) => true,
-                _ => false,
-            }
-        } else {
-            false
-        }
-    }
-
-    fn new_hole() -> Expr {
-        Expr::Hole(RefCell::new(None))
-    }
-
-    fn new_var(s: Rc<String>) -> Expr {
-        Expr::Var(s)
-    }
-
-    fn deref_holes(mut r: Rc<Self>) -> Rc<Expr> {
-        loop {
-            let next = if let Expr::Hole(ref o) = r.as_ref() {
-                if let Some(a) = o.borrow().as_ref() {
-                    a.clone()
-                } else {
-                    break;
-                }
-            } else {
-                break;
-            };
-            r = next;
-        }
-        r
-    }
-
-    fn mp_neg(&self) -> Result<Expr, LfscError> {
-        match self {
-            Expr::NatLit(i) => Ok(Expr::NatLit(-i.clone())),
-            Expr::RatLit(i) => Ok(Expr::RatLit(-i.clone())),
-            a => Err(LfscError::NotMpInNeg(a.clone())),
-        }
-    }
-
-    fn mp_bin(&self, op: MpBinOp, other: &Expr) -> Result<Expr, LfscError> {
-        match (self, other) {
-            (Expr::NatLit(x), Expr::NatLit(y)) => Ok(Expr::NatLit(match op {
-                MpBinOp::Add => Integer::from(x + y),
-                MpBinOp::Div => Integer::from(x / y),
-                MpBinOp::Mul => Integer::from(x * y),
-            })),
-            (Expr::RatLit(x), Expr::RatLit(y)) => Ok(Expr::RatLit(match op {
-                MpBinOp::Add => Rational::from(x + y),
-                MpBinOp::Div => Rational::from(x / y),
-                MpBinOp::Mul => Rational::from(x * y),
-            })),
-            (a, b) => Err(LfscError::NotMpInBin(op.clone(), a.clone(), b.clone())),
-        }
-    }
-
-    fn sub(this: &Rc<Self>, name: &str, value: &Rc<Expr>) -> Rc<Self> {
-        use Expr::*;
-        match this.as_ref() {
-            &Var(ref name_) => {
-                if name == &**name_ {
-                    value.clone()
-                } else {
-                    this.clone()
-                }
-            }
-            &App(ref f, ref args) => Rc::new(App(
-                Expr::sub(f, name, value),
-                args.iter().map(|a| Expr::sub(a, name, value)).collect(),
-            )),
-            &Run(ref code, ref var, ref body) => Rc::new(Run(
-                code.sub(name, value),
-                Expr::sub(var, name, value),
-                Expr::sub(body, name, value),
-            )),
-            &Pi {
-                ref var,
-                ref dom,
-                ref rng,
-            } => {
-                if &**var == name {
-                    this.clone()
-                } else {
-                    Rc::new(Pi {
-                        var: var.clone(),
-                        dom: Expr::sub(dom, name, value),
-                        rng: Expr::sub(rng, name, value),
-                    })
-                }
-            }
-            _ => this.clone(),
-        }
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum EnvEntry {
-    Expr(ExprEnvEntry),
-    Program(PgmEnvEntry),
-}
-
-impl From<EnvEntry> for Result<ExprEnvEntry, PgmEnvEntry> {
-    fn from(e: EnvEntry) -> Self {
-        match e {
-            EnvEntry::Expr(a) => Ok(a),
-            EnvEntry::Program(a) => Err(a),
-        }
-    }
-}
-
-impl From<ExprEnvEntry> for (Rc<Expr>, Rc<Expr>) {
-    fn from(e: ExprEnvEntry) -> Self {
-        (e.val, e.ty)
-    }
-}
-
-#[derive(Debug, PartialEq, Eq, Clone)]
-struct ExprEnvEntry {
-    val: Rc<Expr>,
-    ty: Rc<Expr>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct PgmEnvEntry {
-    val: Program,
-    ty: Rc<Expr>,
-}
-
-#[derive(Debug)]
-struct Env {
-    // Map from identifiers to their values and types
-    types: HashMap<String, EnvEntry>,
-    type_: Rc<Expr>,
-    kind: Rc<Expr>,
-    nat: Rc<Expr>,
-    rat: Rc<Expr>,
-    bot: Rc<Expr>,
-    next_symbol: u64,
-}
-
-impl Default for Env {
-    fn default() -> Self {
-        Self {
-            types: Default::default(),
-            type_: Rc::new(Expr::Type),
-            kind: Rc::new(Expr::Kind),
-            nat: Rc::new(Expr::NatTy),
-            rat: Rc::new(Expr::RatTy),
-            bot: Rc::new(Expr::Bot),
-            next_symbol: 0,
-        }
-    }
-}
-
-type OldBinding = Option<EnvEntry>;
-
-impl Env {
-    pub fn bind_expr(&mut self, name: String, val: Rc<Expr>, ty: Rc<Expr>) -> OldBinding {
-        self.types
-            .insert(name, EnvEntry::Expr(ExprEnvEntry { val, ty }))
-    }
-    pub fn unbind(&mut self, name: &str, o: OldBinding) {
-        if let Some(p) = o {
-            self.types.insert(name.to_owned(), p);
-        } else {
-            self.types.remove(name);
-        }
-    }
-    pub fn binding(&self, name: &str) -> Result<&EnvEntry, LfscError> {
-        self.types
-            .get(name)
-            .ok_or_else(|| LfscError::UnknownIdentifier(name.to_owned()))
-    }
-    pub fn expr_binding(&self, name: &str) -> Result<&ExprEnvEntry, LfscError> {
-        match self.binding(name)? {
-            EnvEntry::Expr(ref e) => Ok(e),
-            _ => Err(LfscError::WrongIdentifierType(
-                "expression",
-                "side condition",
-                name.to_owned(),
-            )),
-        }
-    }
-    pub fn expr_value(&self, name: &str) -> Result<&Rc<Expr>, LfscError> {
-        self.expr_binding(name).map(|p| &p.val)
-    }
-    pub fn ty(&self, name: &str) -> Result<&Rc<Expr>, LfscError> {
-        match self.binding(name)? {
-            EnvEntry::Expr(ref e) => Ok(&e.ty),
-            EnvEntry::Program(ref e) => Ok(&e.ty),
-        }
-    }
-    fn deref(&self, mut r: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-        loop {
-            let next = match r.as_ref() {
-                Expr::Hole(ref o) => {
-                    if let Some(a) = o.borrow().as_ref() {
-                        a.clone()
-                    } else {
-                        break;
-                    }
-                }
-                Expr::Var(s) => {
-                    let ref_ = self.expr_value(&s)?;
-                    if ref_ == &r {
-                        break;
-                    } else {
-                        ref_.clone()
-                    }
-                }
-                _ => break,
-            };
-            r = next;
-        }
-        Ok(r)
-    }
-    pub fn toggle_mark(&self, e: Rc<Expr>, m: u8) -> Result<Rc<Expr>, LfscError> {
-        debug_assert!(m <= 32 && m >= 1);
-        let d = self.deref(e)?;
-        match d.as_ref() {
-            Expr::DeclaredSymbol(_, _, marks) => {
-                marks.set((1u32 << (m - 1)) ^ marks.get());
-            }
-            _ => return Err(LfscError::CannotMark((*d).clone())),
-        }
-        return Ok(d);
-    }
-    pub fn get_mark(&self, e: Rc<Expr>, m: u8) -> Result<bool, LfscError> {
-        debug_assert!(m <= 32 && m >= 1);
-        let d = self.deref(e)?;
-        match d.as_ref() {
-            Expr::DeclaredSymbol(_, _, marks) => {
-                let r = (1u32 << (m - 1)) & marks.get() != 0;
-                Ok(r)
-            }
-            _ => Err(LfscError::CannotMark((*d).clone())),
-        }
-    }
-    fn new_symbol(&mut self, s: String) -> Expr {
-        self.next_symbol += 1;
-        Expr::DeclaredSymbol(self.next_symbol - 1, s, Cell::new(0))
-    }
-    fn unify(&self, a: Rc<Expr>, b: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-        if Rc::ptr_eq(&a, &b) {
-            Ok(a.clone())
-        } else {
-            let aa = self.deref(a)?;
-            let bb = self.deref(b)?;
-            if aa == bb {
-                Ok(aa.clone())
-            } else {
-                Ok((match (aa.as_ref(), bb.as_ref()) {
-                    (Expr::Hole(_), Expr::Hole(_)) => Err(LfscError::Misc("two holes in unify")),
-                    (Expr::Hole(i), _) => {
-                        debug_assert!(i.borrow().is_none());
-                        i.replace(Some(bb));
-                        Ok(aa)
-                    }
-                    (_, Expr::Hole(i)) => {
-                        debug_assert!(i.borrow().is_none());
-                        i.replace(Some(aa));
-                        Ok(bb)
-                    }
-                    (Expr::Bot, _) => Ok(aa),
-                    (_, Expr::Bot) => Ok(bb),
-                    (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
-                        if a_args.len() == b_args.len() {
-                            self.unify(a_f.clone(), b_f.clone())?;
-                            for (x, y) in a_args.iter().cloned().zip(b_args.iter().cloned()) {
-                                self.unify(x, y)?;
-                            }
-                            Ok(aa)
-                        } else {
-                            Err(LfscError::AppArgcMismatch((*aa).clone(), (*bb).clone()))
-                        }
-                    }
-                    (Expr::DeclaredSymbol(x, _, _), Expr::DeclaredSymbol(y, _, _)) if x == y => {
-                        Ok(aa)
-                    }
-                    (Expr::Var(x), Expr::Var(y)) if x == y => Ok(aa),
-                    _ => Err(LfscError::TypeMismatch(aa.clone(), bb.clone())),
-                })?)
-            }
-        }
-    }
-    fn unify_all(&self, tys: impl IntoIterator<Item = Rc<Expr>>) -> Result<Rc<Expr>, LfscError> {
-        let mut non_fails = tys.into_iter();
-        if let Some(first) = non_fails.next() {
-            non_fails.try_fold(first, |a, b| self.unify(a, b))
-        } else {
-            Err(LfscError::NoCases)
-        }
-    }
-}
+use code::{parse_term, Code, MpCond, Pattern};
+use env::{Env, EnvEntry, PgmEnvEntry};
+use error::LfscError;
+use expr::{Expr, Program};
+use rug::Rational;
+use token::{Lexer, Token};
 
 fn consume_var(ts: &mut Lexer) -> Result<Rc<String>, LfscError> {
     Ok(Rc::new(ts.consume_ident()?))
@@ -479,7 +46,7 @@ fn cons_type_pi(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), Lfs
             range_ty,
         ))
     } else {
-        Err(LfscError::InvalidPiRange(range_ty.clone()))
+        Err(LfscError::InvalidPiRange((*range_ty).clone()))
     }
 }
 
@@ -511,14 +78,6 @@ fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Exp
     Ok((v, t))
 }
 
-fn mp_type<'a>(a: &Expr) -> Result<(), LfscError> {
-    if a != &Expr::NatTy && a != &Expr::RatTy {
-        Err(LfscError::BadMqExpr(Rc::new(a.clone())))
-    } else {
-        Ok(())
-    }
-}
-
 fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
     match code {
         Code::Var(s) => Ok(e.deref(e.expr_value(&s)?.clone())?),
@@ -545,7 +104,11 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
                         }
                         Ok(r)
                     } else {
-                        Err(LfscError::Misc("Wrong number of arguments"))
+                        Err(LfscError::WrongNumberOfArgs(
+                            fn_name.clone(),
+                            formal_args.len(),
+                            args.len(),
+                        ))
                     }
                 }
                 EnvEntry::Expr(expr) => Ok(Rc::new(Expr::App(expr.val.clone(), args))),
@@ -578,14 +141,11 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
                 run_code(e, f)
             }
         }
-        Code::NatToRat(i) => {
-            if let Expr::NatLit(x) = run_code(e, i)?.as_ref() {
-                Ok(Rc::new(Expr::RatLit(Rational::new() + x)))
-            } else {
-                Err(LfscError::Misc("non-nat in mpz_to_mpq"))
-            }
-        }
-        Code::Fail(..) => Err(LfscError::Misc("fail")),
+        Code::NatToRat(i) => match run_code(e, i)?.as_ref() {
+            Expr::NatLit(x) => Ok(Rc::new(Expr::RatLit(Rational::new() + x))),
+            x => Err(LfscError::NotMpzInMpzToMpq((*x).clone())),
+        },
+        Code::Fail(i) => Err(LfscError::Fail((*run_code(e, i)?).clone())),
         Code::MpNeg(i) => run_code(e, i)?.as_ref().mp_neg().map(Rc::new),
         Code::MpBin(o, i, j) => run_code(e, i)?
             .as_ref()
@@ -612,7 +172,7 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
                     run_code(e, k)
                 }
             }
-            _ => Err(LfscError::Misc("non mp in NpCond")),
+            t => Err(LfscError::NotMpInMpCond(*o, t.clone())),
         },
         Code::Match(disc, cases) => {
             let d = Expr::deref_holes(run_code(e, disc)?);
@@ -642,14 +202,17 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
                                     }
                                     return Ok(r);
                                 } else {
-                                    return Err(LfscError::Misc("Wrong number of pat bindings"));
+                                    return Err(LfscError::WrongBindingCount((*d).clone(), dargs.len(), vars.len(), pat.clone()));
                                 }
                             }
                         }
                     }
                 }
             }
-            Err(LfscError::Misc("No matching pattern"))
+            Err(LfscError::NoPattern(
+                (*d).clone(),
+                cases.iter().map(|(p, _)| p.clone()).collect(),
+            ))
         }
         Code::Mark(n, i) => {
             let v = run_code(e, i)?;
@@ -666,7 +229,7 @@ fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
         Code::Expr(ex) => {
             let r = e.deref(ex.clone())?;
             match r.as_ref() {
-                &Expr::Hole(_) => Err(LfscError::Misc("Unfilled hole in code!")),
+                &Expr::Hole(_) => Err(LfscError::UnfilledHole),
                 _ => Ok(r),
             }
         }
@@ -690,10 +253,13 @@ fn cons_type_app(
                 ref rng,
                 ref var,
             } => {
-                if let Expr::Run(ref term, ref expected, ref term_ty) = **dom {
+                if let Expr::Run(ref term, ref expected, _) = **dom {
                     let res = run_code(e, term)?;
                     if e.unify(res.clone(), expected.clone()).is_err() {
-                        return Err(LfscError::RunWrongResult(res, expected.clone()));
+                        return Err(LfscError::RunWrongResult(
+                            (*res).clone(),
+                            (**expected).clone(),
+                        ));
                     }
                     ty = rng.clone();
                 } else {
@@ -702,7 +268,7 @@ fn cons_type_app(
                     args.push(arg);
                 }
             }
-            _ => return Err(LfscError::UntypableApplication(ty.clone())),
+            _ => return Err(LfscError::UntypableApplication((*ty).clone())),
         }
     }
     ts.consume_tok(Token::Close)?;
@@ -729,7 +295,7 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
             Percent => cons_type_big_lambda(ts, e),
             Tilde => Ok({
                 let (t, ty) = cons_type(ts, e)?;
-                mp_type(&ty)?;
+                ty.require_mp_ty()?;
                 ts.consume_tok(Close)?;
                 (Rc::new(t.mp_neg()?), ty)
             }),
@@ -761,13 +327,12 @@ fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, 
             let _t = e.unify(ty, ex_ty.clone())?;
             Ok(val)
         }
-        Err(LfscError::UnascribedLambda) => {
-            if let &Expr::Pi {
+        Err(LfscError::UnascribedLambda) => match ex_ty.as_ref() {
+            &Expr::Pi {
                 ref dom,
                 ref rng,
                 ref var,
-            } = ex_ty.as_ref()
-            {
+            } => {
                 let act_var = consume_var(ts)?;
                 let sym = Rc::new(e.new_symbol((*act_var).clone()));
                 let new_expected = Expr::sub(rng, &var, &sym);
@@ -780,10 +345,9 @@ fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, 
                     dom: dom.clone(),
                     rng: res,
                 }))
-            } else {
-                Err(LfscError::Misc("Cannot type a lamda as a non-pi"))
             }
-        }
+            t => Err(LfscError::InvalidLambdaType(t.clone())),
+        },
         Err(e) => Err(e),
     };
     r
@@ -881,18 +445,18 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
             let a = type_code(a, e)?;
             let b = type_code(b, e)?;
             let ty = e.unify(a, b)?;
-            mp_type(&ty)?;
+            ty.require_mp_ty()?;
             Ok(ty)
         }
         Code::MpCond(_, ref c, ref tr, ref fa) => {
-            mp_type(type_code(c, e)?.as_ref())?;
+            type_code(c, e)?.require_mp_ty()?;
             let a = type_code(tr, e)?;
             let b = type_code(fa, e)?;
             e.unify(a, b)
         }
         Code::MpNeg(ref i) => {
             let ty = type_code(i, e)?;
-            mp_type(&ty)?;
+            ty.require_mp_ty()?;
             Ok(ty)
         }
         Code::Fail(ref i) => {
@@ -924,7 +488,7 @@ fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
                     e.unify(a.clone(), dom.clone())?;
                     ty = Expr::sub(&rng, var.as_ref().as_str(), &a);
                 } else {
-                    return Err(LfscError::UntypableApplication(ty.clone()));
+                    return Err(LfscError::UntypableApplication((*ty).clone()));
                 }
             }
             Ok(ty)
@@ -986,7 +550,11 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
             let name = consume_var(ts)?;
             let (ty, kind) = cons_type(ts, e)?;
             if *kind != Expr::Type && *kind != Expr::Kind {
-                return Err(LfscError::BadDeclare((*name).clone(), ty, kind));
+                return Err(LfscError::BadDeclare(
+                    (*name).clone(),
+                    (*ty).clone(),
+                    (*kind).clone(),
+                ));
             }
             let sym = Rc::new(e.new_symbol((*name).clone()));
             e.bind_expr((*name).clone(), sym, ty);
