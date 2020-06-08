@@ -11,3 +11,6 @@ anyhow = "1.0.31"
 logos = "^0.11.4"
 thiserror = "1.0.18"
 rug = "1.8.0"
+
+[profile.release]
+debug = true

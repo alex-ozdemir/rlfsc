@@ -14,11 +14,10 @@ mod error;
 mod expr;
 mod token;
 
-use code::{parse_term, Code, MpCond, Pattern};
+use code::{parse_term, Code, Pattern, run_code};
 use env::{Env, EnvEntry, PgmEnvEntry};
 use error::LfscError;
 use expr::{Expr, Program};
-use rug::Rational;
 use token::{Lexer, Token};
 
 fn consume_var(ts: &mut Lexer) -> Result<Rc<String>, LfscError> {
@@ -76,164 +75,6 @@ fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Exp
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
     Ok((v, t))
-}
-
-fn run_code(e: &mut Env, code: &Code) -> Result<Rc<Expr>, LfscError> {
-    match code {
-        Code::Var(s) => Ok(e.deref(e.expr_value(&s)?.clone())?),
-        Code::App(ref fn_name, ref arg_terms) => {
-            let args = arg_terms
-                .iter()
-                .map(|a| run_code(e, a))
-                .collect::<Result<Vec<_>, _>>()?;
-            match e.binding(fn_name)? {
-                EnvEntry::Program(pgm) => {
-                    let formal_args = pgm.val.args.clone();
-                    let body = pgm.val.body.clone();
-                    if formal_args.len() == args.len() {
-                        let unbinds: Vec<_> = formal_args
-                            .iter()
-                            .zip(args.iter())
-                            .map(|((name, _), a)| {
-                                e.bind_expr(name.clone(), a.clone(), e.bot.clone())
-                            })
-                            .collect();
-                        let r = run_code(e, body.as_ref())?;
-                        for (u, (n, _)) in unbinds.into_iter().zip(formal_args.iter()) {
-                            e.unbind(&n, u);
-                        }
-                        Ok(r)
-                    } else {
-                        Err(LfscError::WrongNumberOfArgs(
-                            fn_name.clone(),
-                            formal_args.len(),
-                            args.len(),
-                        ))
-                    }
-                }
-                EnvEntry::Expr(expr) => Ok(Rc::new(Expr::App(expr.val.clone(), args))),
-            }
-        }
-        Code::NatLit(i) => Ok(Rc::new(Expr::NatLit(i.clone()))),
-        Code::RatLit(r) => Ok(Rc::new(Expr::RatLit(r.clone()))),
-        Code::Do(xs, y) => {
-            for x in xs {
-                run_code(e, x)?;
-            }
-            run_code(e, y)
-        }
-        Code::Let(n, v, body) => {
-            let vv = run_code(e, v)?;
-            let o = e.bind_expr(n.clone(), vv, e.bot.clone());
-            let r = run_code(e, body)?;
-            e.unbind(&n, o);
-            Ok(r)
-        }
-        Code::Cond(c, l, r, t, f) => {
-            let ll = run_code(e, l)?;
-            let rr = run_code(e, r)?;
-            if match c {
-                code::Cond::Equal => Rc::into_raw(ll) == Rc::into_raw(rr),
-                code::Cond::LessThan => Rc::into_raw(ll) < Rc::into_raw(rr),
-            } {
-                run_code(e, t)
-            } else {
-                run_code(e, f)
-            }
-        }
-        Code::NatToRat(i) => match run_code(e, i)?.as_ref() {
-            Expr::NatLit(x) => Ok(Rc::new(Expr::RatLit(Rational::new() + x))),
-            x => Err(LfscError::NotMpzInMpzToMpq((*x).clone())),
-        },
-        Code::Fail(i) => Err(LfscError::Fail((*run_code(e, i)?).clone())),
-        Code::MpNeg(i) => run_code(e, i)?.as_ref().mp_neg().map(Rc::new),
-        Code::MpBin(o, i, j) => run_code(e, i)?
-            .as_ref()
-            .mp_bin(*o, run_code(e, j)?.as_ref())
-            .map(Rc::new),
-        Code::MpCond(o, i, j, k) => match run_code(e, i)?.as_ref() {
-            Expr::NatLit(x) => {
-                if match o {
-                    MpCond::Neg => x < &(0 as u64),
-                    MpCond::Zero => x == &(0 as u64),
-                } {
-                    run_code(e, j)
-                } else {
-                    run_code(e, k)
-                }
-            }
-            Expr::RatLit(x) => {
-                if match o {
-                    MpCond::Neg => x < &(0 as u64),
-                    MpCond::Zero => x == &(0 as u64),
-                } {
-                    run_code(e, j)
-                } else {
-                    run_code(e, k)
-                }
-            }
-            t => Err(LfscError::NotMpInMpCond(*o, t.clone())),
-        },
-        Code::Match(disc, cases) => {
-            let d = Expr::deref_holes(run_code(e, disc)?);
-            for (pat, v) in cases.iter() {
-                match pat {
-                    Pattern::Default => return run_code(e, v),
-                    Pattern::Const(s) => {
-                        if e.unify(e.expr_value(&s)?.clone(), d.clone()).is_ok() {
-                            return run_code(e, v);
-                        }
-                    }
-                    Pattern::App(head_name, vars) => {
-                        let phead = e.expr_value(&head_name)?;
-                        if let Expr::App(dhead, dargs) = d.as_ref() {
-                            if e.unify(phead.clone(), dhead.clone()).is_ok() {
-                                if dargs.len() == vars.len() {
-                                    let unbinds: Vec<_> = vars
-                                        .iter()
-                                        .zip(dargs.iter())
-                                        .map(|(name, a)| {
-                                            e.bind_expr(name.clone(), a.clone(), e.bot.clone())
-                                        })
-                                        .collect();
-                                    let r = run_code(e, v)?;
-                                    for (u, n) in unbinds.into_iter().zip(vars.iter()) {
-                                        e.unbind(&n, u);
-                                    }
-                                    return Ok(r);
-                                } else {
-                                    return Err(LfscError::WrongBindingCount((*d).clone(), dargs.len(), vars.len(), pat.clone()));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            Err(LfscError::NoPattern(
-                (*d).clone(),
-                cases.iter().map(|(p, _)| p.clone()).collect(),
-            ))
-        }
-        Code::Mark(n, i) => {
-            let v = run_code(e, i)?;
-            e.toggle_mark(v.clone(), *n)
-        }
-        Code::IfMarked(n, c, t, f) => {
-            let cond = run_code(e, c)?;
-            if e.get_mark(cond, *n)? {
-                run_code(e, t)
-            } else {
-                run_code(e, f)
-            }
-        }
-        Code::Expr(ex) => {
-            let r = e.deref(ex.clone())?;
-            match r.as_ref() {
-                &Expr::Hole(_) => Err(LfscError::UnfilledHole),
-                _ => Ok(r),
-            }
-        }
-    }
 }
 
 fn cons_type_app(
