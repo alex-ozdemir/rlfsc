@@ -42,11 +42,6 @@ pub struct PgmEnvEntry {
 pub struct Env {
     // Map from identifiers to their values and types
     pub types: HashMap<String, EnvEntry>,
-    pub type_: Rc<Expr>,
-    pub kind: Rc<Expr>,
-    pub nat: Rc<Expr>,
-    pub rat: Rc<Expr>,
-    pub bot: Rc<Expr>,
     next_symbol: u64,
 }
 
@@ -54,11 +49,6 @@ impl Default for Env {
     fn default() -> Self {
         Self {
             types: Default::default(),
-            type_: Rc::new(Expr::Type),
-            kind: Rc::new(Expr::Kind),
-            nat: Rc::new(Expr::NatTy),
-            rat: Rc::new(Expr::RatTy),
-            bot: Rc::new(Expr::Bot),
             next_symbol: 0,
         }
     }
@@ -104,7 +94,7 @@ impl Env {
     }
     pub fn deref(&self, mut r: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
         loop {
-            let next = match r.as_ref() {
+            r = match r.as_ref() {
                 Expr::Hole(ref o) => {
                     if let Some(a) = o.borrow().as_ref() {
                         a.clone()
@@ -112,17 +102,9 @@ impl Env {
                         break;
                     }
                 }
-                Expr::Var(s) => {
-                    let ref_ = self.expr_value(&s)?;
-                    if ref_ == &r {
-                        break;
-                    } else {
-                        ref_.clone()
-                    }
-                }
+                Expr::Var(s) => self.expr_value(&s)?.clone(),
                 _ => break,
             };
-            r = next;
         }
         Ok(r)
     }
@@ -152,12 +134,12 @@ impl Env {
         self.next_symbol += 1;
         Expr::DeclaredSymbol(self.next_symbol - 1, s, Cell::new(0))
     }
-    pub fn unify(&self, a: Rc<Expr>, b: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
+    pub fn unify(&self, a: &Rc<Expr>, b: &Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
         if Rc::ptr_eq(&a, &b) {
             Ok(a.clone())
         } else {
-            let aa = self.deref(a)?;
-            let bb = self.deref(b)?;
+            let aa = self.deref(a.clone())?;
+            let bb = self.deref(b.clone())?;
             if aa == bb {
                 Ok(aa.clone())
             } else {
@@ -177,8 +159,8 @@ impl Env {
                     (_, Expr::Bot) => Ok(bb),
                     (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
                         if a_args.len() == b_args.len() {
-                            self.unify(a_f.clone(), b_f.clone())?;
-                            for (x, y) in a_args.iter().cloned().zip(b_args.iter().cloned()) {
+                            self.unify(a_f, b_f)?;
+                            for (x, y) in a_args.iter().zip(b_args.iter()) {
                                 self.unify(x, y)?;
                             }
                             Ok(aa)
@@ -195,13 +177,35 @@ impl Env {
             }
         }
     }
-    pub fn unify_all(&self, tys: impl IntoIterator<Item = Rc<Expr>>) -> Result<Rc<Expr>, LfscError> {
+    pub fn unify_all(
+        &self,
+        tys: impl IntoIterator<Item = Rc<Expr>>,
+    ) -> Result<Rc<Expr>, LfscError> {
         let mut non_fails = tys.into_iter();
         if let Some(first) = non_fails.next() {
-            non_fails.try_fold(first, |a, b| self.unify(a, b))
+            non_fails.try_fold(first, |a, b| self.unify(&a, &b))
         } else {
             Err(LfscError::NoCases)
         }
     }
 }
 
+pub struct Consts {
+    pub type_: Rc<Expr>,
+    pub kind: Rc<Expr>,
+    pub nat: Rc<Expr>,
+    pub rat: Rc<Expr>,
+    pub bot: Rc<Expr>,
+}
+
+impl Default for Consts {
+    fn default() -> Self {
+        Self {
+            type_: Rc::new(Expr::Type),
+            kind: Rc::new(Expr::Kind),
+            nat: Rc::new(Expr::NatTy),
+            rat: Rc::new(Expr::RatTy),
+            bot: Rc::new(Expr::Bot),
+        }
+    }
+}

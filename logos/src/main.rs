@@ -14,25 +14,27 @@ mod error;
 mod expr;
 mod token;
 
-use code::{parse_term, Code, Pattern, run_code};
-use env::{Env, EnvEntry, PgmEnvEntry};
+use code::{parse_term, run_code, type_code};
+use env::{Env, EnvEntry, PgmEnvEntry, Consts};
 use error::LfscError;
 use expr::{Expr, Program};
 use token::{Lexer, Token};
+
+
 
 fn consume_var(ts: &mut Lexer) -> Result<Rc<String>, LfscError> {
     Ok(Rc::new(ts.consume_ident()?))
 }
 
-fn cons_type_pi(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
+fn cons_type_pi(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_var(ts)?;
-    let domain = cons_check(ts, e, e.type_.clone())?;
+    let domain = cons_check(ts, e, cs, &cs.type_)?;
     let old_binding = e.bind_expr(
         (*var).clone(),
         Rc::new(Expr::new_var(var.clone())),
         domain.clone(),
     );
-    let (range, range_ty) = cons_type(ts, e)?;
+    let (range, range_ty) = cons_type(ts, e, cs)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
     if *range_ty == Expr::Type || *range_ty == Expr::Kind {
@@ -49,29 +51,29 @@ fn cons_type_pi(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), Lfs
     }
 }
 
-fn cons_type_at(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
+fn cons_type_at(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_var(ts)?;
-    let (val, ty) = cons_type(ts, e)?;
+    let (val, ty) = cons_type(ts, e, cs)?;
     let old_binding = e.bind_expr((*var).clone(), val, ty);
-    let (v, t) = cons_type(ts, e)?;
+    let (v, t) = cons_type(ts, e, cs)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
     Ok((v, t))
 }
 
-fn cons_type_ascription(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
-    let ty = cons_check(ts, e, e.type_.clone())?;
-    let t = cons_check(ts, e, ty.clone())?;
+fn cons_type_ascription(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
+    let ty = cons_check(ts, e, cs, &cs.type_)?;
+    let t = cons_check(ts, e, cs, &ty)?;
     ts.consume_tok(Token::Close)?;
     Ok((t, ty))
 }
 
-fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
+fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_var(ts)?;
-    let ty = cons_check(ts, e, e.type_.clone())?;
+    let ty = cons_check(ts, e, cs, &cs.type_)?;
     let sym = Rc::new(e.new_symbol((*var).clone()));
     let old_binding = e.bind_expr((*var).clone(), sym, ty);
-    let (v, t) = cons_type(ts, e)?;
+    let (v, t) = cons_type(ts, e, cs)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
     Ok((v, t))
@@ -80,6 +82,7 @@ fn cons_type_big_lambda(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Exp
 fn cons_type_app(
     ts: &mut Lexer,
     e: &mut Env,
+    cs: &Consts,
     name: String,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let b = e.expr_binding(&name)?;
@@ -95,8 +98,8 @@ fn cons_type_app(
                 ref var,
             } => {
                 if let Expr::Run(ref term, ref expected, _) = **dom {
-                    let res = run_code(e, term)?;
-                    if e.unify(res.clone(), expected.clone()).is_err() {
+                    let res = run_code(e, cs, term)?;
+                    if e.unify(&res, expected).is_err() {
                         return Err(LfscError::RunWrongResult(
                             (*res).clone(),
                             (**expected).clone(),
@@ -104,7 +107,7 @@ fn cons_type_app(
                     }
                     ty = rng.clone();
                 } else {
-                    let arg = cons_check(ts, e, dom.clone())?;
+                    let arg = cons_check(ts, e, cs, dom)?;
                     ty = Expr::sub(rng, var, &arg);
                     args.push(arg);
                 }
@@ -116,7 +119,7 @@ fn cons_type_app(
     Ok((Rc::new(Expr::App(fun, args)), ty))
 }
 
-fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
+fn cons_type(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     use Token::*;
     match ts.require_next()? {
         Token::Type => Ok((Rc::new(Expr::Type), Rc::new(Expr::Kind))),
@@ -130,12 +133,12 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
             Ok(e.expr_binding(n)?.clone().into())
         }
         Open => match ts.require_next()? {
-            Bang => cons_type_pi(ts, e),
-            At => cons_type_at(ts, e),
-            Colon => cons_type_ascription(ts, e),
-            Percent => cons_type_big_lambda(ts, e),
+            Bang => cons_type_pi(ts, e, cs),
+            At => cons_type_at(ts, e, cs),
+            Colon => cons_type_ascription(ts, e, cs),
+            Percent => cons_type_big_lambda(ts, e, cs),
             Tilde => Ok({
-                let (t, ty) = cons_type(ts, e)?;
+                let (t, ty) = cons_type(ts, e, cs)?;
                 ty.require_mp_ty()?;
                 ts.consume_tok(Close)?;
                 (Rc::new(t.mp_neg()?), ty)
@@ -143,12 +146,12 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
             ReverseSolidus => Err(LfscError::UnascribedLambda),
             Ident => {
                 let n = from_utf8(ts.slice()).unwrap().to_owned();
-                cons_type_app(ts, e, n)
+                cons_type_app(ts, e, cs, n)
             }
             Caret => {
                 let run_expr = parse_term(ts)?;
-                let ty = type_code(&run_expr, e)?;
-                let run_res = cons_check(ts, e, ty.clone())?;
+                let ty = type_code(&run_expr, e, cs)?;
+                let run_res = cons_check(ts, e, cs, &ty)?;
                 //let run_res = consume_var(ts)?;
                 ts.consume_tok(Close)?;
                 Ok((
@@ -162,10 +165,10 @@ fn cons_type(ts: &mut Lexer, e: &mut Env) -> Result<(Rc<Expr>, Rc<Expr>), LfscEr
     }
 }
 
-fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-    let r = match cons_type(ts, e) {
+fn cons_check(ts: &mut Lexer, e: &mut Env, cs: &Consts, ex_ty: &Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
+    let r = match cons_type(ts, e, cs) {
         Ok((val, ty)) => {
-            let _t = e.unify(ty, ex_ty.clone())?;
+            let _t = e.unify(&ty, ex_ty)?;
             Ok(val)
         }
         Err(LfscError::UnascribedLambda) => match ex_ty.as_ref() {
@@ -178,7 +181,7 @@ fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, 
                 let sym = Rc::new(e.new_symbol((*act_var).clone()));
                 let new_expected = Expr::sub(rng, &var, &sym);
                 let old_binding = e.bind_expr((*act_var).clone(), sym, dom.clone());
-                let res = cons_check(ts, e, new_expected)?;
+                let res = cons_check(ts, e, cs, &new_expected)?;
                 ts.consume_tok(Token::Close)?;
                 e.unbind(&act_var, old_binding);
                 Ok(Rc::new(Expr::Pi {
@@ -194,7 +197,7 @@ fn cons_check(ts: &mut Lexer, e: &mut Env, ex_ty: Rc<Expr>) -> Result<Rc<Expr>, 
     r
 }
 
-fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
+fn type_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     let name = consume_var(ts)?;
     ts.consume_tok(Token::Open)?;
     let mut args = Vec::new();
@@ -203,7 +206,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
         match ts.require_next()? {
             Token::Close => break,
             Token::Open => {
-                let (arg_name, arg_ty) = check_arg(ts, e)?;
+                let (arg_name, arg_ty) = check_arg(ts, e, cs)?;
                 let old = e.bind_expr(
                     arg_name.clone(),
                     Rc::new(Expr::new_var(Rc::new(arg_name.clone()))),
@@ -215,7 +218,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
             t => return Err(LfscError::UnexpectedToken("an argument", t)),
         }
     }
-    let ret_ty = cons_check(ts, e, e.type_.clone())?;
+    let ret_ty = cons_check(ts, e, cs, &cs.type_)?;
     let pgm_ty = args.iter().rev().fold(ret_ty.clone(), |x, (n, t)| {
         Rc::new(Expr::Pi {
             var: Rc::new(n.clone()),
@@ -229,8 +232,8 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
         pgm_ty.clone(),
     );
     let body = parse_term(ts)?;
-    let body_ty = type_code(&body, e)?;
-    e.unify(body_ty, ret_ty.clone())?;
+    let body_ty = type_code(&body, e, cs)?;
+    e.unify(&body_ty, &ret_ty)?;
     for (n, ub) in unbinds {
         e.unbind(&n, ub);
     }
@@ -249,147 +252,19 @@ fn type_program(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
     Ok(())
 }
 
-fn type_code(t: &Code, e: &mut Env) -> Result<Rc<Expr>, LfscError> {
-    match t {
-        Code::Var(n) => Ok(e.ty(&n)?.clone()),
-        Code::NatLit(_) => Ok(e.nat.clone()),
-        Code::RatLit(..) => Ok(e.rat.clone()),
-        Code::NatToRat(ref i) => {
-            let c = type_code(&i, e)?;
-            e.unify(e.nat.clone(), c)?;
-            Ok(e.rat.clone())
-        }
-        Code::Let(ref name, ref val, ref body) => {
-            let ty = type_code(val, e)?;
-            let o = e.bind_expr(
-                name.to_owned(),
-                Rc::new(Expr::new_var(Rc::new(name.to_owned()))),
-                ty,
-            );
-            let r = type_code(body, e)?;
-            e.unbind(name, o);
-            Ok(r)
-        }
-        Code::IfMarked(_, _, ref tr, ref fa) => {
-            let a = type_code(tr, e)?;
-            let b = type_code(fa, e)?;
-            e.unify(a, b)
-        }
-        Code::Mark(_, ref v) => type_code(v, e),
-        Code::Do(ref init, ref last) => {
-            for i in init {
-                type_code(i, e)?;
-            }
-            type_code(last, e)
-        }
-        Code::MpBin(_, ref a, ref b) => {
-            let a = type_code(a, e)?;
-            let b = type_code(b, e)?;
-            let ty = e.unify(a, b)?;
-            ty.require_mp_ty()?;
-            Ok(ty)
-        }
-        Code::MpCond(_, ref c, ref tr, ref fa) => {
-            type_code(c, e)?.require_mp_ty()?;
-            let a = type_code(tr, e)?;
-            let b = type_code(fa, e)?;
-            e.unify(a, b)
-        }
-        Code::MpNeg(ref i) => {
-            let ty = type_code(i, e)?;
-            ty.require_mp_ty()?;
-            Ok(ty)
-        }
-        Code::Fail(ref i) => {
-            let ty = type_code(i, e)?;
-            e.unify(ty, e.type_.clone())?;
-            Ok(e.bot.clone())
-        }
-        Code::Cond(_, ref a, ref b, ref tr, ref fa) => {
-            let a_ty = type_code(a, e)?;
-            let b_ty = type_code(b, e)?;
-            e.unify(a_ty, b_ty)?;
-            let tr_ty = type_code(tr, e)?;
-            let fa_ty = type_code(fa, e)?;
-            e.unify(tr_ty, fa_ty)
-        }
-        Code::App(ref fn_name, ref args) => {
-            let mut ty = e.ty(fn_name)?.clone();
-            let arg_tys: Vec<_> = args
-                .into_iter()
-                .map(|a| type_code(a, e))
-                .collect::<Result<Vec<_>, _>>()?;
-            for a in arg_tys {
-                if let &Expr::Pi {
-                    ref dom,
-                    ref rng,
-                    ref var,
-                } = ty.as_ref()
-                {
-                    e.unify(a.clone(), dom.clone())?;
-                    ty = Expr::sub(&rng, var.as_ref().as_str(), &a);
-                } else {
-                    return Err(LfscError::UntypableApplication((*ty).clone()));
-                }
-            }
-            Ok(ty)
-        }
-        Code::Match(ref disc, ref cases) => {
-            let disc_ty = type_code(disc, e)?;
-            let tys = cases
-                .into_iter()
-                .map(|(pat, val)| {
-                    match pat {
-                        Pattern::Default => type_code(val, e),
-                        Pattern::Const(ref n) => {
-                            e.unify(e.ty(n)?.clone(), disc_ty.clone())?;
-                            type_code(val, e)
-                        }
-                        Pattern::App(ref n, ref vars) => {
-                            let mut ty = e.ty(n)?.clone();
-                            let mut unbinds = Vec::new();
-                            for v in vars {
-                                if let Expr::Pi {
-                                    ref dom, ref rng, ..
-                                } = ty.as_ref()
-                                {
-                                    let o = e.bind_expr(
-                                        v.clone(),
-                                        Rc::new(Expr::new_var(Rc::new(v.clone()))),
-                                        dom.clone(),
-                                    );
-                                    // TODO check for non-dependence
-                                    ty = rng.clone();
-                                    unbinds.push((v.clone(), o));
-                                } else {
-                                    return Err(LfscError::NonPiPatternHead);
-                                }
-                            }
-                            e.unify(ty, disc_ty.clone())?;
-                            type_code(val, e)
-                        }
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            e.unify_all(tys.into_iter())
-        }
-        Code::Expr(_) => unimplemented!("Cannot type the expression for of code"),
-    }
-}
-
-fn check_arg(ts: &mut Lexer, e: &mut Env) -> Result<(String, Rc<Expr>), LfscError> {
+fn check_arg(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(String, Rc<Expr>), LfscError> {
     let name = ts.consume_ident()?;
-    let ty = cons_check(ts, e, e.type_.clone())?;
+    let ty = cons_check(ts, e, cs, &cs.type_)?;
     ts.consume_tok(Token::Close)?;
     Ok((name, ty))
 }
 
-fn do_cmd(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
+fn do_cmd(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     use Token::{Check, Declare, Define, Program};
     match ts.require_next()? {
         Declare => {
             let name = consume_var(ts)?;
-            let (ty, kind) = cons_type(ts, e)?;
+            let (ty, kind) = cons_type(ts, e, cs)?;
             if *kind != Expr::Type && *kind != Expr::Kind {
                 return Err(LfscError::BadDeclare(
                     (*name).clone(),
@@ -402,15 +277,15 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
         }
         Define => {
             let name = consume_var(ts)?;
-            let (val, ty) = cons_type(ts, e)?;
+            let (val, ty) = cons_type(ts, e, cs)?;
             e.bind_expr((*name).clone(), val, ty);
         }
         Program => {
             // It binds the program internally
-            type_program(ts, e)?;
+            type_program(ts, e, cs)?;
         }
         Check => {
-            cons_type(ts, e)?;
+            cons_type(ts, e, cs)?;
         }
         _ => return Err(LfscError::NotACmd(ts.string())),
     }
@@ -418,10 +293,10 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
     Ok(())
 }
 
-fn do_cmds(ts: &mut Lexer, e: &mut Env) -> Result<(), LfscError> {
+fn do_cmds(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     while let Some(t) = ts.next() {
         match t {
-            Token::Open => do_cmd(ts, e)?,
+            Token::Open => do_cmd(ts, e, cs)?,
             _t => return Err(LfscError::NotACmd(ts.string())),
         }
     }
@@ -433,8 +308,9 @@ fn main() -> Result<(), LfscError> {
     let bytes = read(&path).unwrap();
     let mut lexer = Lexer::from(Token::lexer(&bytes));
     let mut env = Env::default();
+    let consts = Consts::default();
     //    do_cmds(&mut lexer, &mut env)?;
-    if let Err(e) = do_cmds(&mut lexer, &mut env) {
+    if let Err(e) = do_cmds(&mut lexer, &mut env, &consts) {
         println!("Error {}", e);
     }
     Ok(())
