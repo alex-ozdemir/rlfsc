@@ -94,7 +94,7 @@ impl Env {
     }
     pub fn deref(&self, mut r: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
         loop {
-            r = match r.as_ref() {
+            let next = match r.as_ref() {
                 Expr::Hole(ref o) => {
                     if let Some(a) = o.borrow().as_ref() {
                         a.clone()
@@ -105,6 +105,11 @@ impl Env {
                 Expr::Var(s) => self.expr_value(&s)?.clone(),
                 _ => break,
             };
+            if &next == &r {
+                break;
+            } else {
+                r = next;
+            }
         }
         Ok(r)
     }
