@@ -188,7 +188,7 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                     Box::new(parse_term(ts)?),
                 )),
                 Let => Ok(Code::Let(
-                    ts.consume_ident()?,
+                    ts.consume_ident()?.to_owned(),
                     Box::new(parse_term(ts)?),
                     Box::new(parse_term(ts)?),
                 )),
@@ -237,10 +237,10 @@ fn parse_case(ts: &mut Lexer) -> Result<(Pattern, Code), CodeParseError> {
     ts.consume_tok(Token::Open)?;
     let r = match ts.require_next()? {
         Token::Open => {
-            let fun_name = ts.consume_ident()?;
+            let fun_name = ts.consume_ident()?.to_owned();
             let mut bindings = Vec::new();
             while Some(Token::Close) != ts.peek() {
-                bindings.push(ts.consume_ident()?);
+                bindings.push(ts.consume_ident()?.to_owned());
             }
             ts.consume_tok(Token::Close)?;
             Ok(Pattern::App(fun_name, bindings))
@@ -519,7 +519,7 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
             let ty = type_code(val, e, cs)?;
             let o = e.bind_expr(
                 name.to_owned(),
-                Rc::new(Expr::new_var(Rc::new(name.to_owned()))),
+                Rc::new(Expr::new_var(name.to_owned())),
                 ty,
             );
             let r = type_code(body, e, cs)?;
@@ -576,10 +576,11 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                     ref dom,
                     ref rng,
                     ref var,
+                    ..
                 } = ty.as_ref()
                 {
                     e.unify(&a, dom)?;
-                    ty = Expr::sub(&rng, var.as_ref().as_str(), &a);
+                    ty = Expr::sub(&rng, var.0.as_str(), &a);
                 } else {
                     return Err(LfscError::UntypableApplication((*ty).clone()));
                 }
@@ -607,7 +608,7 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                                 {
                                     let o = e.bind_expr(
                                         v.clone(),
-                                        Rc::new(Expr::new_var(Rc::new(v.clone()))),
+                                        Rc::new(Expr::new_var(v.clone())),
                                         dom.clone(),
                                     );
                                     // TODO check for non-dependence

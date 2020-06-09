@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::LfscError;
-use crate::expr::{Expr, Program};
+use crate::expr::{Expr, Program, Var};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum EnvEntry {
@@ -57,6 +57,27 @@ impl Default for Env {
 type OldBinding = Option<EnvEntry>;
 
 impl Env {
+    pub fn var_binding(&self, name: &str) -> Result<(&Rc<Var>, &Rc<Expr>), LfscError> {
+        let b = self.expr_binding(name)?;
+        match b.val.as_ref() {
+            Expr::Var(v) => Ok((v, &b.ty)),
+            _ => Err(LfscError::UnknownIdentifier(name.to_owned())),
+        }
+    }
+    pub fn bind_var(&mut self, var: Rc<Var>, ty: Rc<Expr>) -> (Rc<Var>, OldBinding) {
+        let val = Rc::new(Expr::Var(var.clone()));
+        let t = self
+            .types
+            .insert(var.0.clone(), EnvEntry::Expr(ExprEnvEntry { val, ty }));
+        (var, t)
+    }
+    pub fn unbind_var(&mut self, (name, old): (Rc<Var>, OldBinding)) {
+        if let Some(p) = old {
+            *self.types.get_mut(&name.0).unwrap() = p;
+        } else {
+            self.types.remove(&name.0);
+        }
+    }
     pub fn bind_expr(&mut self, name: String, val: Rc<Expr>, ty: Rc<Expr>) -> OldBinding {
         self.types
             .insert(name, EnvEntry::Expr(ExprEnvEntry { val, ty }))
@@ -102,7 +123,7 @@ impl Env {
                         break;
                     }
                 }
-                Expr::Var(s) => self.expr_value(&s)?.clone(),
+                Expr::Var(s) => self.expr_value(&s.0)?.clone(),
                 _ => break,
             };
             if &next == &r {

@@ -167,10 +167,10 @@ impl<'a> Lexer<'a> {
             Err(TokenError::WrongToken(t, f))
         }
     }
-    pub fn consume_ident(&mut self) -> Result<String, TokenError> {
+    pub fn consume_ident(&mut self) -> Result<&'a str, TokenError> {
         let t = self.require_next()?;
         if let Token::Ident = t {
-            Ok(self.string())
+            Ok(self.str())
         } else {
             Err(TokenError::WrongToken(Token::Ident, t))
         }

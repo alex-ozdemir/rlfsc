@@ -14,6 +14,15 @@ pub struct Program {
     pub body: Rc<Code>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct Var(pub String);
+
+impl Display for Var {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Expr {
     Bot,
@@ -24,13 +33,14 @@ pub enum Expr {
     RatTy,
     RatLit(Rational),
     DeclaredSymbol(u64, String, Cell<u32>),
-    Var(Rc<String>),
+    Var(Rc<Var>),
     /// eval expression, name, type
     Run(Code, Rc<Expr>, Rc<Expr>),
     Pi {
-        var: Rc<String>,
+        var: Rc<Var>,
         dom: Rc<Expr>,
         rng: Rc<Expr>,
+        dependent: bool,
     },
     App(Rc<Expr>, Vec<Rc<Expr>>),
     /// Arguments, return type, body
@@ -63,7 +73,7 @@ impl Display for Expr {
                 Ok(())
             }
             Run(c, n, e) => write!(f, "(^ ({} {}) {})", c, n, e),
-            Pi { var, dom, rng } => write!(f, "(! {} {} {})", var, dom, rng),
+            Pi { var, dom, rng, .. } => write!(f, "(! {} {} {})", var, dom, rng),
             App(head, tail) => {
                 write!(f, "({}", head)?;
                 for t in tail {
@@ -98,8 +108,8 @@ impl Expr {
         Expr::Hole(RefCell::new(None))
     }
 
-    pub fn new_var(s: Rc<String>) -> Expr {
-        Expr::Var(s)
+    pub fn new_var(s: String) -> Expr {
+        Expr::Var(Rc::new(Var(s)))
     }
 
     pub fn deref_holes(mut r: Rc<Self>) -> Rc<Expr> {
@@ -146,7 +156,7 @@ impl Expr {
         use Expr::*;
         match this.as_ref() {
             &Var(ref name_) => {
-                if name == &**name_ {
+                if name == &name_.0 {
                     value.clone()
                 } else {
                     this.clone()
@@ -165,14 +175,16 @@ impl Expr {
                 ref var,
                 ref dom,
                 ref rng,
+                ref dependent,
             } => {
-                if &**var == name {
+                if &var.0 == name {
                     this.clone()
                 } else {
                     Rc::new(Pi {
                         var: var.clone(),
                         dom: Expr::sub(dom, name, value),
                         rng: Expr::sub(rng, name, value),
+                        dependent: *dependent,
                     })
                 }
             }
