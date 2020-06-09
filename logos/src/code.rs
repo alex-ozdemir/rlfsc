@@ -8,7 +8,7 @@ use rug::{Integer, Rational};
 
 use crate::env::{Env, EnvEntry, Consts};
 use crate::error::LfscError;
-use crate::expr::Expr;
+use crate::expr::{Expr, Var};
 use crate::token::{Lexer, Token, TokenError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -90,6 +90,7 @@ impl From<Token> for Cond {
 
 impl Code {
     pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
+        eprintln!("Sub: {}/{} in {}", value, name, self);
         match self {
             &Code::Var(ref name_) => {
                 if name == &**name_ {
@@ -134,7 +135,7 @@ impl From<TokenError> for CodeParseError {
     }
 }
 
-pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
+pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
     use Token::*;
     match ts.require_next()? {
         Ident => Ok(Code::Var(ts.string())),
@@ -146,7 +147,7 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                 Do => {
                     let mut terms = Vec::new();
                     while Some(Close) != ts.peek() {
-                        terms.push(parse_term(ts)?);
+                        terms.push(parse_term(ts, e)?);
                     }
                     if let Some(last) = terms.pop() {
                         Ok(Code::Do(terms, Box::new(last)))
@@ -155,10 +156,10 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                     }
                 }
                 Match => {
-                    let disc = parse_term(ts)?;
+                    let disc = parse_term(ts, e)?;
                     let mut cases = Vec::new();
                     while Some(Close) != ts.peek() {
-                        cases.push(parse_case(ts)?);
+                        cases.push(parse_case(ts, e)?);
                     }
                     if cases.len() == 0 {
                         Err(CodeParseError::EmptyMatch)
@@ -166,31 +167,31 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                         Ok(Code::Match(Box::new(disc), cases))
                     }
                 }
-                Fail => Ok(Code::Fail(Box::new(parse_term(ts)?))),
+                Fail => Ok(Code::Fail(Box::new(parse_term(ts, e)?))),
                 MpAdd | MpMul | MpDiv => Ok(Code::MpBin(
                     MpBinOp::from(nxt),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
                 )),
-                MpNeg | Tilde => Ok(Code::MpNeg(Box::new(parse_term(ts)?))),
+                MpNeg | Tilde => Ok(Code::MpNeg(Box::new(parse_term(ts, e)?))),
                 MpIfNeg | MpIfZero => Ok(Code::MpCond(
                     MpCond::from(nxt),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
                 )),
-                MpzToMpq => Ok(Code::NatToRat(Box::new(parse_term(ts)?))),
+                MpzToMpq => Ok(Code::NatToRat(Box::new(parse_term(ts, e)?))),
                 IfEqual | Compare => Ok(Code::Cond(
                     Cond::from(nxt),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
                 )),
                 Let => Ok(Code::Let(
                     ts.consume_ident()?.to_owned(),
-                    Box::new(parse_term(ts)?),
-                    Box::new(parse_term(ts)?),
+                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e)?),
                 )),
                 IfMarked => {
                     let n = if let "ifmarked" = ts.str() {
@@ -200,9 +201,9 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                     };
                     Ok(Code::IfMarked(
                         n,
-                        Box::new(parse_term(ts)?),
-                        Box::new(parse_term(ts)?),
-                        Box::new(parse_term(ts)?),
+                        Box::new(parse_term(ts, e)?),
+                        Box::new(parse_term(ts, e)?),
+                        Box::new(parse_term(ts, e)?),
                     ))
                 }
                 MarkVar => {
@@ -211,13 +212,13 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
                     } else {
                         u8::from_str(&ts.str()["markvar".len()..]).unwrap()
                     };
-                    Ok(Code::Mark(n, Box::new(parse_term(ts)?)))
+                    Ok(Code::Mark(n, Box::new(parse_term(ts, e)?)))
                 }
                 Ident => {
                     let fun_name = ts.string();
                     let mut args = Vec::new();
                     while Some(Token::Close) != ts.peek() {
-                        args.push(parse_term(ts)?);
+                        args.push(parse_term(ts, e)?);
                     }
                     Ok(Code::App(fun_name, args))
                 }
@@ -233,7 +234,7 @@ pub fn parse_term(ts: &mut Lexer) -> Result<Code, CodeParseError> {
     }
 }
 
-fn parse_case(ts: &mut Lexer) -> Result<(Pattern, Code), CodeParseError> {
+fn parse_case(ts: &mut Lexer, e: &Env) -> Result<(Pattern, Code), CodeParseError> {
     ts.consume_tok(Token::Open)?;
     let r = match ts.require_next()? {
         Token::Open => {
@@ -251,7 +252,7 @@ fn parse_case(ts: &mut Lexer) -> Result<(Pattern, Code), CodeParseError> {
             "case", t,
         ))),
     }?;
-    let val = parse_term(ts)?;
+    let val = parse_term(ts, e)?;
     ts.consume_tok(Token::Close)?;
     Ok((r, val))
 }
@@ -343,7 +344,8 @@ impl Display for Code {
 }
 
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
-    match code {
+    eprintln!("Run: {}", code);
+    let r = match code {
         Code::Var(s) => Ok(e.deref(e.expr_value(&s)?.clone())?),
         Code::App(ref fn_name, ref arg_terms) => {
             let args = arg_terms
@@ -502,7 +504,9 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                 _ => Ok(r),
             }
         }
-    }
+    }?;
+    println!("  => {}", r);
+    Ok(r)
 }
 
 pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscError> {

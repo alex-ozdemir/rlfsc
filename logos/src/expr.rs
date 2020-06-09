@@ -83,7 +83,7 @@ impl Display for Expr {
             }
             Hole(c) => {
                 if let Some(r) = c.borrow().as_ref() {
-                    write!(f, "_{}", r)
+                    write!(f, "_\\{}", r)
                 } else {
                     write!(f, "_")
                 }
@@ -154,6 +154,7 @@ impl Expr {
 
     pub fn sub(this: &Rc<Self>, name: &str, value: &Rc<Expr>) -> Rc<Self> {
         use Expr::*;
+        eprintln!("Sub: {}/{} in {}", value, name, this);
         match this.as_ref() {
             &Var(ref name_) => {
                 if name == &name_.0 {

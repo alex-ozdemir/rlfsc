@@ -5,7 +5,6 @@ use std::convert::{From, Into};
 use std::default::Default;
 use std::env::args;
 use std::fs::read;
-use std::mem::drop;
 use std::rc::Rc;
 
 mod code;
@@ -28,34 +27,32 @@ fn consume_new_var(ts: &mut Lexer) -> Result<Rc<Var>, LfscError> {
     Ok(Rc::new(Var(ts.consume_ident()?.to_owned())))
 }
 
-fn consume_old_var<'a>(ts: &mut Lexer, e: &'a Env) -> Result<(&'a Rc<Var>, &'a Rc<Expr>), LfscError> {
-    e.var_binding(ts.consume_ident()?)
-}
-
 fn cons_type_pi(
     ts: &mut Lexer,
     e: &mut Env,
     cs: &Consts,
+    create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_new_var(ts)?;
     let (domain, _) = cons_type(ts, e, cs, Some(&cs.type_), true)?;
-    let old_binding = e.bind_var(
-        var.clone(),
-        domain.clone(),
-    );
-    let (range, range_ty) = cons_type(ts, e, cs, None, true)?;
+    let old_binding = e.bind_var(var.clone(), domain.clone());
+    let (range, range_ty) = cons_type(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
     e.unbind_var(old_binding);
-    // If there is only one reference to var now, then it must be free in the range.
-    let dependent = Rc::strong_count(&var) > 1;
     if *range_ty == Expr::Type || *range_ty == Expr::Kind {
         Ok((
-            Rc::new(Expr::Pi {
-                var,
-                dom: domain,
-                rng: range,
-                dependent,
-            }),
+            if create {
+                // If there is only one reference to var now, then it must be free in the range.
+                let dependent = Rc::strong_count(&var) > 1;
+                Rc::new(Expr::Pi {
+                    var,
+                    dom: domain,
+                    rng: range,
+                    dependent,
+                })
+            } else {
+                cs.bot.clone()
+            },
             range_ty,
         ))
     } else {
@@ -67,11 +64,12 @@ fn cons_type_at(
     ts: &mut Lexer,
     e: &mut Env,
     cs: &Consts,
+    create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_string(ts)?;
     let (val, ty) = cons_type(ts, e, cs, None, true)?;
     let old_binding = e.bind_expr(var.clone(), val, ty);
-    let (v, t) = cons_type(ts, e, cs, None, true)?;
+    let (v, t) = cons_type(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
     Ok((v, t))
@@ -81,9 +79,10 @@ fn cons_type_ascription(
     ts: &mut Lexer,
     e: &mut Env,
     cs: &Consts,
+    create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let ty = cons_type(ts, e, cs, Some(&cs.type_), true)?.0;
-    let t = cons_type(ts, e, cs, Some(&ty), true)?.0;
+    let t = cons_type(ts, e, cs, Some(&ty), create)?.0;
     ts.consume_tok(Token::Close)?;
     Ok((t, ty))
 }
@@ -92,12 +91,13 @@ fn cons_type_big_lambda(
     ts: &mut Lexer,
     e: &mut Env,
     cs: &Consts,
+    create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let var = consume_string(ts)?;
     let ty = cons_type(ts, e, cs, Some(&cs.type_), true)?.0;
     let sym = Rc::new(e.new_symbol(var.clone()));
     let old_binding = e.bind_expr(var.clone(), sym, ty);
-    let (v, t) = cons_type(ts, e, cs, None, true)?;
+    let (v, t) = cons_type(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(&var, old_binding);
     Ok((v, t))
@@ -108,6 +108,7 @@ fn cons_type_app(
     e: &mut Env,
     cs: &Consts,
     name: String,
+    create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
     let b = e.expr_binding(&name)?;
     let fun = b.val.clone();
@@ -132,8 +133,12 @@ fn cons_type_app(
                     }
                     ty = rng.clone();
                 } else {
-                    let arg = cons_type(ts, e, cs, Some(dom), true)?.0;
-                    ty = Expr::sub(rng, &var.0, &arg);
+                    let arg = cons_type(ts, e, cs, Some(dom), create || *dependent)?.0;
+                    ty = if *dependent {
+                        Expr::sub(rng, &var.0, &arg)
+                    } else {
+                        rng.clone()
+                    };
                     args.push(arg);
                 }
             }
@@ -141,7 +146,14 @@ fn cons_type_app(
         }
     }
     ts.consume_tok(Token::Close)?;
-    Ok((Rc::new(Expr::App(fun, args)), ty))
+    Ok((
+        if create {
+            Rc::new(Expr::App(fun, args))
+        } else {
+            cs.bot.clone()
+        },
+        ty,
+    ))
 }
 
 fn cons_type(
@@ -151,6 +163,10 @@ fn cons_type(
     ex_ty: Option<&Rc<Expr>>,
     create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
+    dbg!(create);
+    if let Some(tt) = ex_ty.as_ref() {
+        println!("Ex: {}", tt);
+    }
     use Token::*;
     let (ast, ty) = match ts.require_next()? {
         Token::Type => Ok((Rc::new(Expr::Type), Rc::new(Expr::Kind))),
@@ -161,12 +177,12 @@ fn cons_type(
         Token::Hole => Ok((Rc::new(Expr::new_hole()), Rc::new(Expr::new_hole()))),
         Ident => Ok(e.expr_binding(ts.str())?.clone().into()),
         Open => match ts.require_next()? {
-            Bang => cons_type_pi(ts, e, cs),
-            At => cons_type_at(ts, e, cs),
-            Colon => cons_type_ascription(ts, e, cs),
-            Percent => cons_type_big_lambda(ts, e, cs),
+            Bang => cons_type_pi(ts, e, cs, create),
+            At => cons_type_at(ts, e, cs, create),
+            Colon => cons_type_ascription(ts, e, cs, create),
+            Percent => cons_type_big_lambda(ts, e, cs, create),
             Tilde => Ok({
-                let (t, ty) = cons_type(ts, e, cs, None, true)?;
+                let (t, ty) = cons_type(ts, e, cs, None, create)?;
                 ty.require_mp_ty()?;
                 ts.consume_tok(Close)?;
                 (Rc::new(t.mp_neg()?), ty)
@@ -182,24 +198,28 @@ fn cons_type(
                     let sym = Rc::new(e.new_symbol(act_var.clone()));
                     let new_expected = Expr::sub(rng, &var.0, &sym);
                     let old_binding = e.bind_expr(act_var.clone(), sym, dom.clone());
-                    let res = cons_type(ts, e, cs, Some(&new_expected), true)?.0;
+                    let res = cons_type(ts, e, cs, Some(&new_expected), create)?.0;
                     ts.consume_tok(Token::Close)?;
                     e.unbind(&act_var, old_binding);
                     return Ok((
-                        Rc::new(Expr::Pi {
-                            var: var.clone(),
-                            dom: dom.clone(),
-                            rng: res,
-                            dependent: *dependent,
-                        }),
+                        if create {
+                            Rc::new(Expr::Pi {
+                                var: var.clone(),
+                                dom: dom.clone(),
+                                rng: res,
+                                dependent: *dependent,
+                            })
+                        } else {
+                            cs.bot.clone()
+                        },
                         ex_ty.unwrap().clone(),
-                    ))
-                },
+                    ));
+                }
                 t => Err(LfscError::InvalidLambdaType(t.clone())),
             },
-            Ident => cons_type_app(ts, e, cs, ts.string()),
+            Ident => cons_type_app(ts, e, cs, ts.string(), create),
             Caret => {
-                let run_expr = parse_term(ts)?;
+                let run_expr = parse_term(ts, e)?;
                 let ty = type_code(&run_expr, e, cs)?;
                 let run_res = cons_type(ts, e, cs, Some(&ty), true)?.0;
                 //let run_res = consume_var(ts)?;
@@ -254,7 +274,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErro
         Rc::new(Expr::new_var(name.clone())),
         pgm_ty.clone(),
     );
-    let body = parse_term(ts)?;
+    let body = parse_term(ts, e)?;
     let body_ty = type_code(&body, e, cs)?;
     e.unify(&body_ty, &ret_ty)?;
     for (n, ub) in unbinds {
@@ -308,7 +328,7 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
             type_program(ts, e, cs)?;
         }
         Check => {
-            cons_type(ts, e, cs, None, true)?;
+            cons_type(ts, e, cs, None, false)?;
         }
         _ => return Err(LfscError::NotACmd(ts.string())),
     }
