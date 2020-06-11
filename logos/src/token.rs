@@ -131,11 +131,11 @@ impl<'a> Lexer<'a> {
     pub fn next(&mut self) -> Option<Token> {
         self.peek_slice = self.inner.slice();
         let n = std::mem::replace(&mut self.peek, self.inner.next());
-        println!(
-            "Token: {:?}, Slice: {:?}",
-            n,
-            from_utf8(self.peek_slice).unwrap()
-        );
+        //println!(
+        //    "Token: {:?}, Slice: {:?}",
+        //    n,
+        //    from_utf8(self.peek_slice).unwrap()
+        //);
         n
     }
     pub fn require_next(&mut self) -> Result<Token, TokenError> {

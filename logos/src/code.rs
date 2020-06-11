@@ -31,7 +31,7 @@ pub enum Code {
     Fail(Box<Code>),
     Cond(Cond, Box<Code>, Box<Code>, Box<Code>, Box<Code>),
     NatToRat(Box<Code>),
-    Var(String),
+    Var(Rc<Var>),
     NatLit(Integer),
     RatLit(Rational),
     App(String, Vec<Code>),
@@ -90,10 +90,10 @@ impl From<Token> for Cond {
 
 impl Code {
     pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
-        eprintln!("Sub: {}/{} in {}", value, name, self);
+        //eprintln!("Sub: {}/{} in {}", value, name, self);
         match self {
             &Code::Var(ref name_) => {
-                if name == &**name_ {
+                if name == &name_.0 {
                     Code::Expr(value.clone())
                 } else {
                     self.clone()
@@ -135,10 +135,15 @@ impl From<TokenError> for CodeParseError {
     }
 }
 
-pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
+fn consume_new_var(ts: &mut Lexer) -> Result<Rc<Var>, LfscError> {
+    Ok(Rc::new(Var(ts.consume_ident()?.to_owned())))
+}
+
+pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, LfscError> {
     use Token::*;
     match ts.require_next()? {
-        Ident => Ok(Code::Var(ts.string())),
+        Ident =>
+                Ok(Code::Var(e.var_binding(ts.str())?.0.clone())),
         Natural => Ok(Code::NatLit(ts.nat())),
         Rational => Ok(Code::RatLit(ts.rat())),
         Open => {
@@ -147,7 +152,7 @@ pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
                 Do => {
                     let mut terms = Vec::new();
                     while Some(Close) != ts.peek() {
-                        terms.push(parse_term(ts, e)?);
+                        terms.push(parse_term(ts, e, cs)?);
                     }
                     if let Some(last) = terms.pop() {
                         Ok(Code::Do(terms, Box::new(last)))
@@ -156,10 +161,10 @@ pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
                     }
                 }
                 Match => {
-                    let disc = parse_term(ts, e)?;
+                    let disc = parse_term(ts, e, cs)?;
                     let mut cases = Vec::new();
                     while Some(Close) != ts.peek() {
-                        cases.push(parse_case(ts, e)?);
+                        cases.push(parse_case(ts, e, cs)?);
                     }
                     if cases.len() == 0 {
                         Err(CodeParseError::EmptyMatch)
@@ -167,32 +172,35 @@ pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
                         Ok(Code::Match(Box::new(disc), cases))
                     }
                 }
-                Fail => Ok(Code::Fail(Box::new(parse_term(ts, e)?))),
+                Fail => Ok(Code::Fail(Box::new(parse_term(ts, e, cs)?))),
                 MpAdd | MpMul | MpDiv => Ok(Code::MpBin(
                     MpBinOp::from(nxt),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e, cs)?),
+                    Box::new(parse_term(ts, e, cs)?),
                 )),
-                MpNeg | Tilde => Ok(Code::MpNeg(Box::new(parse_term(ts, e)?))),
+                MpNeg | Tilde => Ok(Code::MpNeg(Box::new(parse_term(ts, e, cs)?))),
                 MpIfNeg | MpIfZero => Ok(Code::MpCond(
                     MpCond::from(nxt),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e, cs)?),
+                    Box::new(parse_term(ts, e, cs)?),
+                    Box::new(parse_term(ts, e, cs)?),
                 )),
-                MpzToMpq => Ok(Code::NatToRat(Box::new(parse_term(ts, e)?))),
+                MpzToMpq => Ok(Code::NatToRat(Box::new(parse_term(ts, e, cs)?))),
                 IfEqual | Compare => Ok(Code::Cond(
                     Cond::from(nxt),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
+                    Box::new(parse_term(ts, e, cs)?),
+                    Box::new(parse_term(ts, e, cs)?),
+                    Box::new(parse_term(ts, e, cs)?),
+                    Box::new(parse_term(ts, e, cs)?),
                 )),
-                Let => Ok(Code::Let(
-                    ts.consume_ident()?.to_owned(),
-                    Box::new(parse_term(ts, e)?),
-                    Box::new(parse_term(ts, e)?),
-                )),
+                Let => {
+                    let n = consume_new_var(ts)?;
+                    let v = Box::new(parse_term(ts, e, cs)?);
+                    let o = e.bind_var(n.clone(), cs.bot.clone());
+                    let body = Box::new(parse_term(ts, e, cs)?);
+                    e.unbind_var(o);
+                    Ok(Code::Let(n.0.clone(), v, body))
+                }
                 IfMarked => {
                     let n = if let "ifmarked" = ts.str() {
                         1
@@ -201,9 +209,9 @@ pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
                     };
                     Ok(Code::IfMarked(
                         n,
-                        Box::new(parse_term(ts, e)?),
-                        Box::new(parse_term(ts, e)?),
-                        Box::new(parse_term(ts, e)?),
+                        Box::new(parse_term(ts, e, cs)?),
+                        Box::new(parse_term(ts, e, cs)?),
+                        Box::new(parse_term(ts, e, cs)?),
                     ))
                 }
                 MarkVar => {
@@ -212,13 +220,14 @@ pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
                     } else {
                         u8::from_str(&ts.str()["markvar".len()..]).unwrap()
                     };
-                    Ok(Code::Mark(n, Box::new(parse_term(ts, e)?)))
+                    Ok(Code::Mark(n, Box::new(parse_term(ts, e, cs)?)))
                 }
                 Ident => {
+                    // TODO(aozdemir) Lookup fun_name
                     let fun_name = ts.string();
                     let mut args = Vec::new();
                     while Some(Token::Close) != ts.peek() {
-                        args.push(parse_term(ts, e)?);
+                        args.push(parse_term(ts, e, cs)?);
                     }
                     Ok(Code::App(fun_name, args))
                 }
@@ -230,31 +239,36 @@ pub fn parse_term(ts: &mut Lexer, e: &Env) -> Result<Code, CodeParseError> {
             ts.consume_tok(Token::Close)?;
             Ok(r)
         }
-        t => Err(CodeParseError::from(TokenError::UnexpectedToken("term", t))),
+        t => Err(LfscError::from(CodeParseError::from(TokenError::UnexpectedToken("term", t)))),
     }
 }
 
-fn parse_case(ts: &mut Lexer, e: &Env) -> Result<(Pattern, Code), CodeParseError> {
+fn parse_case(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Pattern, Code), LfscError> {
     ts.consume_tok(Token::Open)?;
     let r = match ts.require_next()? {
         Token::Open => {
             let fun_name = ts.consume_ident()?.to_owned();
             let mut bindings = Vec::new();
             while Some(Token::Close) != ts.peek() {
-                bindings.push(ts.consume_ident()?.to_owned());
+                bindings.push(consume_new_var(ts)?);
             }
             ts.consume_tok(Token::Close)?;
-            Ok(Pattern::App(fun_name, bindings))
+            let os = bindings.iter().map(|v| e.bind_var(v.clone(), cs.bot.clone())).collect::<Vec<_>>();
+            let r = Pattern::App(fun_name, bindings.into_iter().map(|i| i.0.clone()).collect());
+            let t = parse_term(ts, e, cs)?;
+            for o in os {
+                e.unbind_var(o);
+            }
+            Ok((r, t))
         }
-        Token::Ident => Ok(Pattern::Const(ts.string())),
-        Token::Default => Ok(Pattern::Default),
-        t => Err(CodeParseError::from(CodeParseError::UnexpectedToken(
+        Token::Ident => Ok((Pattern::Const(ts.string()), parse_term(ts, e, cs)?)),
+        Token::Default => Ok((Pattern::Default, parse_term(ts, e, cs)?)),
+        t => Err(LfscError::from(CodeParseError::from(CodeParseError::UnexpectedToken(
             "case", t,
-        ))),
+        )))),
     }?;
-    let val = parse_term(ts, e)?;
     ts.consume_tok(Token::Close)?;
-    Ok((r, val))
+    Ok(r)
 }
 
 impl Display for Pattern {
@@ -344,9 +358,9 @@ impl Display for Code {
 }
 
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
-    eprintln!("Run: {}", code);
+    //eprintln!("Run: {}", code);
     let r = match code {
-        Code::Var(s) => Ok(e.deref(e.expr_value(&s)?.clone())?),
+        Code::Var(s) => Ok(e.deref(e.expr_value(&s.0)?.clone())?),
         Code::App(ref fn_name, ref arg_terms) => {
             let args = arg_terms
                 .iter()
@@ -505,13 +519,13 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             }
         }
     }?;
-    println!("  => {}", r);
+    //println!("  => {}", r);
     Ok(r)
 }
 
 pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscError> {
     match t {
-        Code::Var(n) => Ok(e.ty(&n)?.clone()),
+        Code::Var(n) => Ok(e.ty(&n.0)?.clone()),
         Code::NatLit(_) => Ok(cs.nat.clone()),
         Code::RatLit(..) => Ok(cs.rat.clone()),
         Code::NatToRat(ref i) => {

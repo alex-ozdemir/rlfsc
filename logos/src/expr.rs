@@ -154,7 +154,7 @@ impl Expr {
 
     pub fn sub(this: &Rc<Self>, name: &str, value: &Rc<Expr>) -> Rc<Self> {
         use Expr::*;
-        eprintln!("Sub: {}/{} in {}", value, name, this);
+        //eprintln!("Sub: {}/{} in {}", value, name, this);
         match this.as_ref() {
             &Var(ref name_) => {
                 if name == &name_.0 {

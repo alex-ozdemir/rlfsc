@@ -57,14 +57,16 @@ impl Default for Env {
 type OldBinding = Option<EnvEntry>;
 
 impl Env {
-    pub fn var_binding(&self, name: &str) -> Result<(&Rc<Var>, &Rc<Expr>), LfscError> {
+    pub fn var_binding(&self, name: &str) -> Result<(Rc<Var>, &Rc<Expr>), LfscError> {
         let b = self.expr_binding(name)?;
         match b.val.as_ref() {
-            Expr::Var(v) => Ok((v, &b.ty)),
+            Expr::Var(v) => Ok((v.clone(), &b.ty)),
+            Expr::DeclaredSymbol(_, s, _) => Ok((Rc::new(Var(s.clone())), &b.ty)),
             _ => Err(LfscError::UnknownIdentifier(name.to_owned())),
         }
     }
     pub fn bind_var(&mut self, var: Rc<Var>, ty: Rc<Expr>) -> (Rc<Var>, OldBinding) {
+        //eprintln!("Bind: {} -> {}", var, ty);
         let val = Rc::new(Expr::Var(var.clone()));
         let t = self
             .types

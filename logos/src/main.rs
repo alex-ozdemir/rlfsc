@@ -163,10 +163,10 @@ fn cons_type(
     ex_ty: Option<&Rc<Expr>>,
     create: bool,
 ) -> Result<(Rc<Expr>, Rc<Expr>), LfscError> {
-    dbg!(create);
-    if let Some(tt) = ex_ty.as_ref() {
-        println!("Ex: {}", tt);
-    }
+    //dbg!(create);
+    //if let Some(tt) = ex_ty.as_ref() {
+    //    println!("Ex: {}", tt);
+    //}
     use Token::*;
     let (ast, ty) = match ts.require_next()? {
         Token::Type => Ok((Rc::new(Expr::Type), Rc::new(Expr::Kind))),
@@ -219,7 +219,7 @@ fn cons_type(
             },
             Ident => cons_type_app(ts, e, cs, ts.string(), create),
             Caret => {
-                let run_expr = parse_term(ts, e)?;
+                let run_expr = parse_term(ts, e, cs)?;
                 let ty = type_code(&run_expr, e, cs)?;
                 let run_res = cons_type(ts, e, cs, Some(&ty), true)?.0;
                 //let run_res = consume_var(ts)?;
@@ -274,7 +274,7 @@ fn type_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErro
         Rc::new(Expr::new_var(name.clone())),
         pgm_ty.clone(),
     );
-    let body = parse_term(ts, e)?;
+    let body = parse_term(ts, e, cs)?;
     let body_ty = type_code(&body, e, cs)?;
     e.unify(&body_ty, &ret_ty)?;
     for (n, ub) in unbinds {
