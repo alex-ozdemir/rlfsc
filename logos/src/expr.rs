@@ -8,18 +8,37 @@ use crate::code::{Code, MpBinOp};
 use crate::error::LfscError;
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct Ref {
+    pub name: String,
+    pub val: RefCell<Option<Rc<Expr>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
-    pub args: Vec<(String, Rc<Expr>)>,
+    /// A reference and type for each argument
+    pub args: Vec<(Rc<Ref>, Rc<Expr>)>,
+    /// The return type of the function
     pub ret_ty: Rc<Expr>,
+    /// The body of the function
     pub body: Rc<Code>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct Var(pub String);
 
-impl Display for Var {
+impl Ref {
+    pub fn new(name: String) -> Self {
+        Self {
+            name,
+            val: RefCell::new(None),
+        }
+    }
+}
+impl Display for Ref {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.name)?;
+        if let Some(r) = self.val.borrow().as_ref() {
+            write!(f, " (bound to {})", r)?;
+        }
+        Ok(())
     }
 }
 
@@ -33,11 +52,11 @@ pub enum Expr {
     RatTy,
     RatLit(Rational),
     DeclaredSymbol(u64, String, Cell<u32>),
-    Var(Rc<Var>),
+    Ref(Rc<Ref>),
     /// eval expression, name, type
     Run(Code, Rc<Expr>, Rc<Expr>),
     Pi {
-        var: Rc<Var>,
+        var: Rc<Ref>,
         dom: Rc<Expr>,
         rng: Rc<Expr>,
         dependent: bool,
@@ -45,6 +64,7 @@ pub enum Expr {
     App(Rc<Expr>, Vec<Rc<Expr>>),
     /// Arguments, return type, body
     Hole(RefCell<Option<Rc<Expr>>>),
+    Program(Program),
 }
 
 impl Display for Expr {
@@ -58,7 +78,7 @@ impl Display for Expr {
             RatTy => write!(f, "mpq"),
             NatLit(u) => write!(f, "{}", u),
             RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
-            Var(s) => write!(f, "{}", s),
+            Ref(s) => write!(f, "{}", s),
             DeclaredSymbol(id, s, marks) => {
                 write!(f, "{}{{{}}}", s, id)?;
                 if marks.get() != 0 {
@@ -88,6 +108,7 @@ impl Display for Expr {
                     write!(f, "_")
                 }
             }
+            Program(_) => write!(f, "<program>"),
         }
     }
 }
@@ -109,7 +130,30 @@ impl Expr {
     }
 
     pub fn new_var(s: String) -> Expr {
-        Expr::Var(Rc::new(Var(s)))
+        Expr::Ref(Rc::new(Ref::new(s)))
+    }
+
+    fn deref_once(r: &Rc<Expr>) -> Option<Rc<Expr>> {
+        match r.as_ref() {
+            Expr::Hole(x) => x.borrow().clone(),
+            Expr::Ref(x) => x.as_ref().val.borrow().clone(),
+            _ => None,
+        }
+    }
+
+    pub fn deref(mut r: Rc<Expr>) -> Rc<Expr> {
+        loop {
+            let next = match Expr::deref_once(&r) {
+                Some(ref_) => ref_.clone(),
+                None => break,
+            };
+            if &next == &r {
+                break;
+            } else {
+                r = next;
+            }
+        }
+        r
     }
 
     pub fn deref_holes(mut r: Rc<Self>) -> Rc<Expr> {
@@ -156,8 +200,8 @@ impl Expr {
         use Expr::*;
         //eprintln!("Sub: {}/{} in {}", value, name, this);
         match this.as_ref() {
-            &Var(ref name_) => {
-                if name == &name_.0 {
+            &Ref(ref ref_) => {
+                if name == &ref_.name {
                     value.clone()
                 } else {
                     this.clone()
@@ -178,7 +222,7 @@ impl Expr {
                 ref rng,
                 ref dependent,
             } => {
-                if &var.0 == name {
+                if &var.name == name {
                     this.clone()
                 } else {
                     Rc::new(Pi {
@@ -200,4 +244,60 @@ impl Expr {
         }
     }
 
+    pub fn name(&self) -> Result<&str, LfscError> {
+        match self {
+            Expr::DeclaredSymbol(_, s, _) => Ok(&s),
+            Expr::Ref(r) => Ok(&r.name),
+            _ => Err(LfscError::NoName(self.clone())),
+        }
+    }
+
+    pub fn unify_test(a: &Rc<Expr>, b: &Rc<Expr>) -> bool {
+        if Rc::ptr_eq(&a, &b) {
+            true
+        } else {
+            let aa = Expr::deref(a.clone());
+            let bb = Expr::deref(b.clone());
+            if aa == bb {
+                true
+            } else {
+                match (aa.as_ref(), bb.as_ref()) {
+                    (Expr::Hole(_), Expr::Hole(_)) => false,
+                    (Expr::Hole(i), _) => {
+                        debug_assert!(i.borrow().is_none());
+                        i.replace(Some(bb));
+                        true
+                    }
+                    (_, Expr::Hole(i)) => {
+                        debug_assert!(i.borrow().is_none());
+                        i.replace(Some(aa));
+                        true
+                    }
+                    (Expr::Bot, _) => true,
+                    (_, Expr::Bot) => true,
+                    (Expr::App(a_f, a_args), Expr::App(b_f, b_args)) => {
+                        if a_args.len() == b_args.len() {
+                            if !Expr::unify_test(a_f, b_f) {
+                                return false;
+                            }
+                            for (x, y) in a_args.iter().zip(b_args.iter()) {
+                                if !Expr::unify_test(x, y) {
+                                    return false;
+                                }
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    (Expr::DeclaredSymbol(x, _, _), Expr::DeclaredSymbol(y, _, _)) if x == y => {
+                        false
+                    }
+                    // TODO remove?
+                    (Expr::Ref(x), Expr::Ref(y)) if &x.name == &y.name => true,
+                    _ => false,
+                }
+            }
+        }
+    }
 }

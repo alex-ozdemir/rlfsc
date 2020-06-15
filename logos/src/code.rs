@@ -6,22 +6,22 @@ use thiserror::Error;
 
 use rug::{Integer, Rational};
 
-use crate::env::{Env, EnvEntry, Consts};
+use crate::env::{Consts, Env};
 use crate::error::LfscError;
-use crate::expr::{Expr, Var};
+use crate::expr::{Expr, Ref};
 use crate::token::{Lexer, Token, TokenError};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern {
     Default,
-    App(String, Vec<String>),
-    Const(String),
+    App(Rc<Expr>, Vec<Rc<Ref>>),
+    Const(Rc<Expr>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Code {
     Match(Box<Code>, Vec<(Pattern, Code)>),
-    Let(String, Box<Code>, Box<Code>),
+    Let(Rc<Ref>, Box<Code>, Box<Code>),
     IfMarked(u8, Box<Code>, Box<Code>, Box<Code>),
     Mark(u8, Box<Code>),
     Do(Vec<Code>, Box<Code>),
@@ -31,7 +31,6 @@ pub enum Code {
     Fail(Box<Code>),
     Cond(Cond, Box<Code>, Box<Code>, Box<Code>, Box<Code>),
     NatToRat(Box<Code>),
-    Var(Rc<Var>),
     NatLit(Integer),
     RatLit(Rational),
     App(String, Vec<Code>),
@@ -92,13 +91,6 @@ impl Code {
     pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
         //eprintln!("Sub: {}/{} in {}", value, name, self);
         match self {
-            &Code::Var(ref name_) => {
-                if name == &name_.0 {
-                    Code::Expr(value.clone())
-                } else {
-                    self.clone()
-                }
-            }
             &Code::App(ref f, ref args) if f != name => Code::App(
                 f.clone(),
                 args.iter().map(|a| Code::sub(a, name, value)).collect(),
@@ -135,15 +127,14 @@ impl From<TokenError> for CodeParseError {
     }
 }
 
-fn consume_new_var(ts: &mut Lexer) -> Result<Rc<Var>, LfscError> {
-    Ok(Rc::new(Var(ts.consume_ident()?.to_owned())))
+fn consume_new_ref(ts: &mut Lexer) -> Result<Rc<Ref>, LfscError> {
+    Ok(Rc::new(Ref::new(ts.consume_ident()?.to_owned())))
 }
 
 pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, LfscError> {
     use Token::*;
     match ts.require_next()? {
-        Ident =>
-                Ok(Code::Var(e.var_binding(ts.str())?.0.clone())),
+        Ident => Ok(Code::Expr(e.expr_value(ts.str())?.clone())),
         Natural => Ok(Code::NatLit(ts.nat())),
         Rational => Ok(Code::RatLit(ts.rat())),
         Open => {
@@ -194,12 +185,14 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
                     Box::new(parse_term(ts, e, cs)?),
                 )),
                 Let => {
-                    let n = consume_new_var(ts)?;
+                    let n = consume_new_ref(ts)?;
+                    let name = n.name.clone();
+                    let ref_ = Rc::new(Expr::Ref(n.clone()));
                     let v = Box::new(parse_term(ts, e, cs)?);
-                    let o = e.bind_var(n.clone(), cs.bot.clone());
+                    let o = e.bind(name, ref_.clone(), cs.bot.clone());
                     let body = Box::new(parse_term(ts, e, cs)?);
-                    e.unbind_var(o);
-                    Ok(Code::Let(n.0.clone(), v, body))
+                    e.unbind(o);
+                    Ok(Code::Let(n, v, body))
                 }
                 IfMarked => {
                     let n = if let "ifmarked" = ts.str() {
@@ -239,7 +232,9 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
             ts.consume_tok(Token::Close)?;
             Ok(r)
         }
-        t => Err(LfscError::from(CodeParseError::from(TokenError::UnexpectedToken("term", t)))),
+        t => Err(LfscError::from(CodeParseError::from(
+            TokenError::UnexpectedToken("term", t),
+        ))),
     }
 }
 
@@ -247,25 +242,37 @@ fn parse_case(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Pattern, Code
     ts.consume_tok(Token::Open)?;
     let r = match ts.require_next()? {
         Token::Open => {
-            let fun_name = ts.consume_ident()?.to_owned();
+            let fun = e.expr_value(ts.consume_ident()?)?.clone();
             let mut bindings = Vec::new();
             while Some(Token::Close) != ts.peek() {
-                bindings.push(consume_new_var(ts)?);
+                bindings.push(consume_new_ref(ts)?);
             }
             ts.consume_tok(Token::Close)?;
-            let os = bindings.iter().map(|v| e.bind_var(v.clone(), cs.bot.clone())).collect::<Vec<_>>();
-            let r = Pattern::App(fun_name, bindings.into_iter().map(|i| i.0.clone()).collect());
+            let os = bindings
+                .iter()
+                .map(|v| {
+                    e.bind(
+                        v.name.clone(),
+                        Rc::new(Expr::Ref(v.clone())),
+                        cs.bot.clone(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let r = Pattern::App(fun, bindings);
             let t = parse_term(ts, e, cs)?;
             for o in os {
-                e.unbind_var(o);
+                e.unbind(o);
             }
             Ok((r, t))
         }
-        Token::Ident => Ok((Pattern::Const(ts.string()), parse_term(ts, e, cs)?)),
+        Token::Ident => Ok((
+            Pattern::Const(e.expr_value(ts.str())?.clone()),
+            parse_term(ts, e, cs)?,
+        )),
         Token::Default => Ok((Pattern::Default, parse_term(ts, e, cs)?)),
-        t => Err(LfscError::from(CodeParseError::from(CodeParseError::UnexpectedToken(
-            "case", t,
-        )))),
+        t => Err(LfscError::from(CodeParseError::from(
+            CodeParseError::UnexpectedToken("case", t),
+        ))),
     }?;
     ts.consume_tok(Token::Close)?;
     Ok(r)
@@ -345,7 +352,6 @@ impl Display for Code {
             Expr(e) => write!(f, "{}", e),
             NatLit(u) => write!(f, "{}", u),
             RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
-            Var(s) => write!(f, "{}", s),
             App(head, tail) => {
                 write!(f, "({}", head)?;
                 for t in tail {
@@ -360,27 +366,25 @@ impl Display for Code {
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
     //eprintln!("Run: {}", code);
     let r = match code {
-        Code::Var(s) => Ok(e.deref(e.expr_value(&s.0)?.clone())?),
         Code::App(ref fn_name, ref arg_terms) => {
             let args = arg_terms
                 .iter()
                 .map(|a| run_code(e, cs, a))
                 .collect::<Result<Vec<_>, _>>()?;
-            match e.binding(fn_name)? {
-                EnvEntry::Program(pgm) => {
-                    let formal_args = pgm.val.args.clone();
-                    let body = pgm.val.body.clone();
+            let v = &e.binding(fn_name)?.val;
+            match v.as_ref() {
+                Expr::Program(pgm) => {
+                    let formal_args = pgm.args.clone();
+                    let body = pgm.body.clone();
                     if formal_args.len() == args.len() {
                         let unbinds: Vec<_> = formal_args
                             .iter()
                             .zip(args.iter())
-                            .map(|((name, _), a)| {
-                                e.bind_expr(name.clone(), a.clone(), cs.bot.clone())
-                            })
+                            .map(|((ref_, _), a)| ref_.val.replace(Some(a.clone())))
                             .collect();
                         let r = run_code(e, cs, body.as_ref())?;
                         for (u, (n, _)) in unbinds.into_iter().zip(formal_args.iter()) {
-                            e.unbind(&n, u);
+                            n.val.replace(u);
                         }
                         Ok(r)
                     } else {
@@ -391,7 +395,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                         ))
                     }
                 }
-                EnvEntry::Expr(expr) => Ok(Rc::new(Expr::App(expr.val.clone(), args))),
+                _ => Ok(Rc::new(Expr::App(v.clone(), args))),
             }
         }
         Code::NatLit(i) => Ok(Rc::new(Expr::NatLit(i.clone()))),
@@ -404,9 +408,9 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
         }
         Code::Let(n, v, body) => {
             let vv = run_code(e, cs, v)?;
-            let o = e.bind_expr(n.clone(), vv, cs.bot.clone());
+            let o = n.val.replace(Some(vv));
             let r = run_code(e, cs, body)?;
-            e.unbind(&n, o);
+            n.val.replace(o);
             Ok(r)
         }
         Code::Cond(c, l, r, t, f) => {
@@ -460,25 +464,22 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                 match pat {
                     Pattern::Default => return run_code(e, cs, v),
                     Pattern::Const(s) => {
-                        if e.unify(e.expr_value(&s)?, &d).is_ok() {
+                        if Expr::unify_test(s, &d) {
                             return run_code(e, cs, v);
                         }
                     }
-                    Pattern::App(head_name, vars) => {
-                        let phead = e.expr_value(&head_name)?;
+                    Pattern::App(phead, vars) => {
                         if let Expr::App(dhead, dargs) = d.as_ref() {
-                            if e.unify(phead, dhead).is_ok() {
+                            if Expr::unify_test(phead, dhead) {
                                 if dargs.len() == vars.len() {
                                     let unbinds: Vec<_> = vars
                                         .iter()
                                         .zip(dargs.iter())
-                                        .map(|(name, a)| {
-                                            e.bind_expr(name.clone(), a.clone(), cs.bot.clone())
-                                        })
+                                        .map(|(ref_, a)| ref_.val.replace(Some(a.clone())))
                                         .collect();
                                     let r = run_code(e, cs, v)?;
                                     for (u, n) in unbinds.into_iter().zip(vars.iter()) {
-                                        e.unbind(&n, u);
+                                        n.val.replace(u);
                                     }
                                     return Ok(r);
                                 } else {
@@ -512,7 +513,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             }
         }
         Code::Expr(ex) => {
-            let r = e.deref(ex.clone())?;
+            let r = Expr::deref(ex.clone());
             match r.as_ref() {
                 &Expr::Hole(_) => Err(LfscError::UnfilledHole),
                 _ => Ok(r),
@@ -524,8 +525,8 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
 }
 
 pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscError> {
-    match t {
-        Code::Var(n) => Ok(e.ty(&n.0)?.clone()),
+    //eprintln!("Type code: {}", t);
+    let r = match t {
         Code::NatLit(_) => Ok(cs.nat.clone()),
         Code::RatLit(..) => Ok(cs.rat.clone()),
         Code::NatToRat(ref i) => {
@@ -535,13 +536,9 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
         }
         Code::Let(ref name, ref val, ref body) => {
             let ty = type_code(val, e, cs)?;
-            let o = e.bind_expr(
-                name.to_owned(),
-                Rc::new(Expr::new_var(name.to_owned())),
-                ty,
-            );
+            let o = e.bind(name.name.clone(), cs.bot.clone(), ty);
             let r = type_code(body, e, cs)?;
-            e.unbind(name, o);
+            e.unbind(o);
             Ok(r)
         }
         Code::IfMarked(_, _, ref tr, ref fa) => {
@@ -585,6 +582,7 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
         }
         Code::App(ref fn_name, ref args) => {
             let mut ty = e.ty(fn_name)?.clone();
+            //println!("app {} -> {}", fn_name, ty);
             let arg_tys: Vec<_> = args
                 .into_iter()
                 .map(|a| type_code(a, e, cs))
@@ -598,7 +596,7 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                 } = ty.as_ref()
                 {
                     e.unify(&a, dom)?;
-                    ty = Expr::sub(&rng, var.0.as_str(), &a);
+                    ty = Expr::sub(&rng, &var.name, &a);
                 } else {
                     return Err(LfscError::UntypableApplication((*ty).clone()));
                 }
@@ -613,20 +611,20 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                     match pat {
                         Pattern::Default => type_code(val, e, cs),
                         Pattern::Const(ref n) => {
-                            e.unify(e.ty(n)?, &disc_ty)?;
+                            e.unify(e.ty(n.name()?)?, &disc_ty)?;
                             type_code(val, e, cs)
                         }
                         Pattern::App(ref n, ref vars) => {
-                            let mut ty = e.ty(n)?.clone();
+                            let mut ty = e.ty(n.name()?)?.clone();
                             let mut unbinds = Vec::new();
                             for v in vars {
                                 if let Expr::Pi {
                                     ref dom, ref rng, ..
                                 } = ty.as_ref()
                                 {
-                                    let o = e.bind_expr(
-                                        v.clone(),
-                                        Rc::new(Expr::new_var(v.clone())),
+                                    let o = e.bind(
+                                        v.name.clone(),
+                                        cs.bot.clone(),
                                         dom.clone(),
                                     );
                                     // TODO check for non-dependence
@@ -644,6 +642,13 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                 .collect::<Result<Vec<_>, _>>()?;
             e.unify_all(tys.into_iter())
         }
-        Code::Expr(_) => unimplemented!("Cannot type the expression for of code"),
-    }
+        Code::Expr(expr) => {
+            match expr.as_ref().name() {
+                Ok(n) => Ok(e.ty(n)?.clone()),
+                Err(_) => unimplemented!("Check {} in code", expr),
+            }
+        }
+    }?;
+    //println!(" => {}", r);
+    Ok(r)
 }

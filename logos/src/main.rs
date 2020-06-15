@@ -14,17 +14,13 @@ mod expr;
 mod token;
 
 use code::{parse_term, run_code, type_code};
-use env::{Consts, Env, EnvEntry, PgmEnvEntry};
+use env::{Consts, Env, ExprEnvEntry};
 use error::LfscError;
-use expr::{Expr, Program, Var};
+use expr::{Expr, Program, Ref};
 use token::{Lexer, Token};
 
-fn consume_string(ts: &mut Lexer) -> Result<String, LfscError> {
-    Ok(ts.consume_ident()?.to_owned())
-}
-
-fn consume_new_var(ts: &mut Lexer) -> Result<Rc<Var>, LfscError> {
-    Ok(Rc::new(Var(ts.consume_ident()?.to_owned())))
+fn consume_new_ref(ts: &mut Lexer) -> Result<Rc<Ref>, LfscError> {
+    Ok(Rc::new(Ref::new(ts.consume_ident()?.to_owned())))
 }
 
 fn check_pi(
@@ -33,12 +29,12 @@ fn check_pi(
     cs: &Consts,
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
-    let var = consume_new_var(ts)?;
+    let var = consume_new_ref(ts)?;
     let (domain, _) = check_create(ts, e, cs, Some(&cs.type_))?;
-    let old_binding = e.bind_var(var.clone(), domain.clone());
+    let old_binding = e.bind(var.name.clone(), Rc::new(Expr::Ref(var.clone())), domain.clone());
     let (range, range_ty) = check(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
-    e.unbind_var(old_binding);
+    e.unbind(old_binding);
     if *range_ty == Expr::Type || *range_ty == Expr::Kind {
         Ok((
             if create {
@@ -66,12 +62,12 @@ fn check_let(
     cs: &Consts,
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
-    let var = consume_string(ts)?;
+    let name = ts.consume_ident()?.to_owned();
     let (val, ty) = check_create(ts, e, cs, None)?;
-    let old_binding = e.bind_expr(var.clone(), val, ty);
+    let old_binding = e.bind(name, val, ty);
     let (v, t) = check(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
-    e.unbind(&var, old_binding);
+    e.unbind(old_binding);
     Ok((v, t))
 }
 
@@ -93,13 +89,13 @@ fn check_big_lambda(
     cs: &Consts,
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
-    let var = consume_string(ts)?;
+    let var = ts.consume_ident()?.to_owned();
     let ty = check_create(ts, e, cs, Some(&cs.type_))?.0;
     let sym = Rc::new(e.new_symbol(var.clone()));
-    let old_binding = e.bind_expr(var.clone(), sym, ty);
+    let old_binding = e.bind(var, sym, ty);
     let (v, t) = check(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
-    e.unbind(&var, old_binding);
+    e.unbind(old_binding);
     Ok((v, t))
 }
 
@@ -135,7 +131,7 @@ fn check_app(
                 } else {
                     let arg = check(ts, e, cs, Some(dom), create || *dependent)?.0;
                     ty = if *dependent {
-                        Expr::sub(rng, &var.0, arg.as_ref().unwrap())
+                        Expr::sub(rng, &var.name, arg.as_ref().unwrap())
                     } else {
                         rng.clone()
                     };
@@ -182,7 +178,7 @@ fn check(
     let (ast, ty) = match ts.require_next()? {
         Token::Type => Ok((Some(cs.type_.clone()), cs.kind.clone())),
         Token::Mpz => Ok((Some(cs.nat.clone()), cs.type_.clone())),
-        Token::Mpq => Ok((Some(cs.nat.clone()), cs.type_.clone())),
+        Token::Mpq => Ok((Some(cs.rat.clone()), cs.type_.clone())),
         Token::Natural => Ok((Some(Rc::new(Expr::NatLit(ts.nat()))), cs.nat.clone())),
         Token::Rational => Ok((Some(Rc::new(Expr::RatLit(ts.rat()))), cs.rat.clone())),
         Token::Hole => Ok((Some(Rc::new(Expr::new_hole())), Rc::new(Expr::new_hole()))),
@@ -216,13 +212,13 @@ fn check(
                     ref var,
                     ref dependent,
                 } => {
-                    let act_var = consume_string(ts)?;
+                    let act_var = ts.consume_ident()?.to_owned();
                     let sym = Rc::new(e.new_symbol(act_var.clone()));
-                    let new_expected = Expr::sub(rng, &var.0, &sym);
-                    let old_binding = e.bind_expr(act_var.clone(), sym, dom.clone());
+                    let new_expected = Expr::sub(rng, &var.name, &sym);
+                    let old_binding = e.bind(act_var, sym, dom.clone());
                     let res = check(ts, e, cs, Some(&new_expected), create)?.0;
                     ts.consume_tok(Token::Close)?;
-                    e.unbind(&act_var, old_binding);
+                    e.unbind(old_binding);
                     return Ok((
                         if create {
                             Some(Rc::new(Expr::Pi {
@@ -262,7 +258,7 @@ fn check(
 }
 
 fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
-    let name = consume_string(ts)?;
+    let name = ts.consume_ident()?.to_owned();
     ts.consume_tok(Token::Open)?;
     let mut args = Vec::new();
     let mut unbinds = Vec::new();
@@ -270,14 +266,14 @@ fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErr
         match ts.require_next()? {
             Token::Close => break,
             Token::Open => {
-                let (arg_name, arg_ty) = check_arg(ts, e, cs)?;
-                let old = e.bind_expr(
-                    arg_name.clone(),
-                    Rc::new(Expr::new_var(arg_name.clone())),
+                let (arg_ref, arg_ty) = check_arg(ts, e, cs)?;
+                let old = e.bind(
+                    arg_ref.name.clone(),
+                    Rc::new(Expr::Ref(arg_ref.clone())),
                     arg_ty.clone(),
                 );
-                unbinds.push((arg_name.clone(), old));
-                args.push((arg_name, arg_ty));
+                unbinds.push(old);
+                args.push((arg_ref, arg_ty));
             }
             t => return Err(LfscError::UnexpectedToken("an argument", t)),
         }
@@ -285,50 +281,50 @@ fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErr
     let ret_ty = check_create(ts, e, cs, Some(&cs.type_))?.0;
     let pgm_ty = args.iter().rev().fold(ret_ty.clone(), |x, (n, t)| {
         Rc::new(Expr::Pi {
-            var: Rc::new(Var(n.clone())),
+            var: n.clone(),
             rng: x,
             dom: t.clone(),
             dependent: false,
         })
     });
-    e.bind_expr(
+    e.bind(
         name.clone(),
-        Rc::new(Expr::new_var(name.clone())),
+        cs.bot.clone(),
         pgm_ty.clone(),
     );
     let body = parse_term(ts, e, cs)?;
     let body_ty = type_code(&body, e, cs)?;
     e.unify(&body_ty, &ret_ty)?;
-    for (n, ub) in unbinds {
-        e.unbind(&n, ub);
+    for u in unbinds {
+        e.unbind(u);
     }
-    let pgm = Program {
+    let pgm = Rc::new(Expr::Program(Program {
         args,
         ret_ty,
         body: Rc::new(body),
-    };
+    }));
     e.types.insert(
         name.clone(),
-        EnvEntry::Program(PgmEnvEntry {
+        ExprEnvEntry {
             val: pgm,
             ty: pgm_ty,
-        }),
+        },
     );
     Ok(())
 }
 
-fn check_arg(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(String, Rc<Expr>), LfscError> {
-    let name = ts.consume_ident()?;
+fn check_arg(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Ref>, Rc<Expr>), LfscError> {
+    let name = consume_new_ref(ts)?;
     let ty = check_create(ts, e, cs, Some(&cs.type_))?.0;
     ts.consume_tok(Token::Close)?;
-    Ok((name.to_owned(), ty))
+    Ok((name, ty))
 }
 
 fn do_cmd(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     use Token::{Check, Declare, Define, Program};
     match ts.require_next()? {
         Declare => {
-            let name = consume_string(ts)?;
+            let name = ts.consume_ident()?.to_owned();
             let (ty, kind) = check_create(ts, e, cs, None)?;
             if *kind != Expr::Type && *kind != Expr::Kind {
                 return Err(LfscError::BadDeclare(
@@ -338,12 +334,12 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
                 ));
             }
             let sym = Rc::new(e.new_symbol(name.clone()));
-            e.bind_expr(name.clone(), sym, ty);
+            e.bind(name.clone(), sym, ty);
         }
         Define => {
-            let name = consume_string(ts)?;
+            let name = ts.consume_ident()?.to_owned();
             let (val, ty) = check_create(ts, e, cs, None)?;
-            e.bind_expr(name.clone(), val, ty);
+            e.bind(name.clone(), val, ty);
         }
         Program => {
             // It binds the program internally

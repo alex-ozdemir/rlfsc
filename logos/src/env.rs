@@ -3,22 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::LfscError;
-use crate::expr::{Expr, Program, Var};
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum EnvEntry {
-    Expr(ExprEnvEntry),
-    Program(PgmEnvEntry),
-}
-
-impl From<EnvEntry> for Result<ExprEnvEntry, PgmEnvEntry> {
-    fn from(e: EnvEntry) -> Self {
-        match e {
-            EnvEntry::Expr(a) => Ok(a),
-            EnvEntry::Program(a) => Err(a),
-        }
-    }
-}
+use crate::expr::{Expr};
 
 impl From<ExprEnvEntry> for (Rc<Expr>, Rc<Expr>) {
     fn from(e: ExprEnvEntry) -> Self {
@@ -32,16 +17,10 @@ pub struct ExprEnvEntry {
     pub ty: Rc<Expr>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct PgmEnvEntry {
-    pub val: Program,
-    pub ty: Rc<Expr>,
-}
-
 #[derive(Debug)]
 pub struct Env {
     // Map from identifiers to their values and types
-    pub types: HashMap<String, EnvEntry>,
+    pub types: HashMap<String, ExprEnvEntry>,
     next_symbol: u64,
 }
 
@@ -54,91 +33,38 @@ impl Default for Env {
     }
 }
 
-type OldBinding = Option<EnvEntry>;
+type OldBinding = (String, Option<ExprEnvEntry>);
 
 impl Env {
-    pub fn var_binding(&self, name: &str) -> Result<(Rc<Var>, &Rc<Expr>), LfscError> {
-        let b = self.expr_binding(name)?;
-        match b.val.as_ref() {
-            Expr::Var(v) => Ok((v.clone(), &b.ty)),
-            Expr::DeclaredSymbol(_, s, _) => Ok((Rc::new(Var(s.clone())), &b.ty)),
-            _ => Err(LfscError::UnknownIdentifier(name.to_owned())),
-        }
+    pub fn bind(&mut self, name: String, val: Rc<Expr>, ty: Rc<Expr>) -> OldBinding {
+        let name_cp = name.clone();
+        let old = self.types.insert(name, ExprEnvEntry { val, ty });
+        (name_cp, old)
     }
-    pub fn bind_var(&mut self, var: Rc<Var>, ty: Rc<Expr>) -> (Rc<Var>, OldBinding) {
-        //eprintln!("Bind: {} -> {}", var, ty);
-        let val = Rc::new(Expr::Var(var.clone()));
-        let t = self
-            .types
-            .insert(var.0.clone(), EnvEntry::Expr(ExprEnvEntry { val, ty }));
-        (var, t)
-    }
-    pub fn unbind_var(&mut self, (name, old): (Rc<Var>, OldBinding)) {
-        if let Some(p) = old {
-            *self.types.get_mut(&name.0).unwrap() = p;
+    pub fn unbind(&mut self, (name, o): OldBinding) {
+        if let Some(val) = o {
+            self.types.insert(name, val);
         } else {
-            self.types.remove(&name.0);
+            self.types.remove(&name);
         }
     }
-    pub fn bind_expr(&mut self, name: String, val: Rc<Expr>, ty: Rc<Expr>) -> OldBinding {
-        self.types
-            .insert(name, EnvEntry::Expr(ExprEnvEntry { val, ty }))
-    }
-    pub fn unbind(&mut self, name: &str, o: OldBinding) {
-        if let Some(p) = o {
-            self.types.insert(name.to_owned(), p);
-        } else {
-            self.types.remove(name);
-        }
-    }
-    pub fn binding(&self, name: &str) -> Result<&EnvEntry, LfscError> {
+    pub fn binding(&self, name: &str) -> Result<&ExprEnvEntry, LfscError> {
         self.types
             .get(name)
             .ok_or_else(|| LfscError::UnknownIdentifier(name.to_owned()))
     }
     pub fn expr_binding(&self, name: &str) -> Result<&ExprEnvEntry, LfscError> {
-        match self.binding(name)? {
-            EnvEntry::Expr(ref e) => Ok(e),
-            _ => Err(LfscError::WrongIdentifierType(
-                "expression",
-                "side condition",
-                name.to_owned(),
-            )),
-        }
+        self.binding(name)
     }
     pub fn expr_value(&self, name: &str) -> Result<&Rc<Expr>, LfscError> {
         self.expr_binding(name).map(|p| &p.val)
     }
     pub fn ty(&self, name: &str) -> Result<&Rc<Expr>, LfscError> {
-        match self.binding(name)? {
-            EnvEntry::Expr(ref e) => Ok(&e.ty),
-            EnvEntry::Program(ref e) => Ok(&e.ty),
-        }
-    }
-    pub fn deref(&self, mut r: Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-        loop {
-            let next = match r.as_ref() {
-                Expr::Hole(ref o) => {
-                    if let Some(a) = o.borrow().as_ref() {
-                        a.clone()
-                    } else {
-                        break;
-                    }
-                }
-                Expr::Var(s) => self.expr_value(&s.0)?.clone(),
-                _ => break,
-            };
-            if &next == &r {
-                break;
-            } else {
-                r = next;
-            }
-        }
-        Ok(r)
+        Ok(&self.binding(name)?.ty)
     }
     pub fn toggle_mark(&self, e: Rc<Expr>, m: u8) -> Result<Rc<Expr>, LfscError> {
         debug_assert!(m <= 32 && m >= 1);
-        let d = self.deref(e)?;
+        let d = Expr::deref(e);
         match d.as_ref() {
             Expr::DeclaredSymbol(_, _, marks) => {
                 marks.set((1u32 << (m - 1)) ^ marks.get());
@@ -149,7 +75,7 @@ impl Env {
     }
     pub fn get_mark(&self, e: Rc<Expr>, m: u8) -> Result<bool, LfscError> {
         debug_assert!(m <= 32 && m >= 1);
-        let d = self.deref(e)?;
+        let d = Expr::deref(e);
         match d.as_ref() {
             Expr::DeclaredSymbol(_, _, marks) => {
                 let r = (1u32 << (m - 1)) & marks.get() != 0;
@@ -163,11 +89,12 @@ impl Env {
         Expr::DeclaredSymbol(self.next_symbol - 1, s, Cell::new(0))
     }
     pub fn unify(&self, a: &Rc<Expr>, b: &Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
+        //println!("unify {} {}", a, b);
         if Rc::ptr_eq(&a, &b) {
             Ok(a.clone())
         } else {
-            let aa = self.deref(a.clone())?;
-            let bb = self.deref(b.clone())?;
+            let aa = Expr::deref(a.clone());
+            let bb = Expr::deref(b.clone());
             if aa == bb {
                 Ok(aa.clone())
             } else {
@@ -199,7 +126,8 @@ impl Env {
                     (Expr::DeclaredSymbol(x, _, _), Expr::DeclaredSymbol(y, _, _)) if x == y => {
                         Ok(aa)
                     }
-                    (Expr::Var(x), Expr::Var(y)) if x == y => Ok(aa),
+                    // TODO remove?
+                    (Expr::Ref(x), Expr::Ref(y)) if &x.name == &y.name => Ok(aa),
                     _ => Err(LfscError::TypeMismatch((*aa).clone(), (*bb).clone())),
                 })?)
             }

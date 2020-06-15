@@ -11,6 +11,8 @@ pub enum LfscError {
     UnexpectedEof,
     #[error("Unknown identifier `{0}`")]
     UnknownIdentifier(String),
+    #[error("Expr `{0}` does not have a name")]
+    NoName(Expr),
     #[error("Expect a {0}, but found token `{1:?}`")]
     UnexpectedToken(&'static str, Token),
     #[error("A Pi-binding's range must have type 'type' or 'kind', but it has type {0:?}")]
