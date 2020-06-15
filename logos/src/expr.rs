@@ -15,12 +15,13 @@ pub struct Ref {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Program {
+    pub name: String,
     /// A reference and type for each argument
     pub args: Vec<(Rc<Ref>, Rc<Expr>)>,
     /// The return type of the function
     pub ret_ty: Rc<Expr>,
     /// The body of the function
-    pub body: Rc<Code>,
+    pub body: RefCell<Code>,
 }
 
 
@@ -248,6 +249,7 @@ impl Expr {
         match self {
             Expr::DeclaredSymbol(_, s, _) => Ok(&s),
             Expr::Ref(r) => Ok(&r.name),
+            Expr::Program(p) => Ok(&p.name),
             _ => Err(LfscError::NoName(self.clone())),
         }
     }

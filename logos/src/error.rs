@@ -58,7 +58,7 @@ pub enum LfscError {
     #[error("Cannot unify two holes!")]
     TwoHoles,
     #[error("The function {0} requires {1} arguments, but got {2}")]
-    WrongNumberOfArgs(String, usize, usize),
+    WrongNumberOfArgs(Expr, usize, usize),
     #[error("Fail with type {0}")]
     Fail(Expr),
     #[error("Unfilled hole in code")]

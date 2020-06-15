@@ -33,7 +33,7 @@ pub enum Code {
     NatToRat(Box<Code>),
     NatLit(Integer),
     RatLit(Rational),
-    App(String, Vec<Code>),
+    App(Rc<Expr>, Vec<Code>),
     Expr(Rc<Expr>),
 }
 
@@ -91,8 +91,8 @@ impl Code {
     pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
         //eprintln!("Sub: {}/{} in {}", value, name, self);
         match self {
-            &Code::App(ref f, ref args) if f != name => Code::App(
-                f.clone(),
+            &Code::App(ref f, ref args) => Code::App(
+                Expr::sub(f, name, value),
                 args.iter().map(|a| Code::sub(a, name, value)).collect(),
             ),
             &Code::MpNeg(ref f) => Code::MpNeg(Box::new(Code::sub(f, name, value))),
@@ -217,12 +217,13 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
                 }
                 Ident => {
                     // TODO(aozdemir) Lookup fun_name
-                    let fun_name = ts.string();
+                    let fun_name = ts.str();
+                    let fun = e.expr_value(fun_name)?.clone();
                     let mut args = Vec::new();
                     while Some(Token::Close) != ts.peek() {
                         args.push(parse_term(ts, e, cs)?);
                     }
-                    Ok(Code::App(fun_name, args))
+                    Ok(Code::App(fun, args))
                 }
                 t => Err(CodeParseError::from(TokenError::UnexpectedToken(
                     "term head",
@@ -366,36 +367,35 @@ impl Display for Code {
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
     //eprintln!("Run: {}", code);
     let r = match code {
-        Code::App(ref fn_name, ref arg_terms) => {
+        Code::App(ref fun, ref arg_terms) => {
             let args = arg_terms
                 .iter()
                 .map(|a| run_code(e, cs, a))
                 .collect::<Result<Vec<_>, _>>()?;
-            let v = &e.binding(fn_name)?.val;
-            match v.as_ref() {
+            match fun.as_ref() {
                 Expr::Program(pgm) => {
                     let formal_args = pgm.args.clone();
-                    let body = pgm.body.clone();
+                    let body = pgm.body.borrow();
                     if formal_args.len() == args.len() {
                         let unbinds: Vec<_> = formal_args
                             .iter()
                             .zip(args.iter())
                             .map(|((ref_, _), a)| ref_.val.replace(Some(a.clone())))
                             .collect();
-                        let r = run_code(e, cs, body.as_ref())?;
+                        let r = run_code(e, cs, &body)?;
                         for (u, (n, _)) in unbinds.into_iter().zip(formal_args.iter()) {
                             n.val.replace(u);
                         }
                         Ok(r)
                     } else {
                         Err(LfscError::WrongNumberOfArgs(
-                            fn_name.clone(),
+                            (**fun).clone(),
                             formal_args.len(),
                             args.len(),
                         ))
                     }
                 }
-                _ => Ok(Rc::new(Expr::App(v.clone(), args))),
+                _ => Ok(Rc::new(Expr::App(fun.clone(), args))),
             }
         }
         Code::NatLit(i) => Ok(Rc::new(Expr::NatLit(i.clone()))),
@@ -525,7 +525,6 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
 }
 
 pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscError> {
-    //eprintln!("Type code: {}", t);
     let r = match t {
         Code::NatLit(_) => Ok(cs.nat.clone()),
         Code::RatLit(..) => Ok(cs.rat.clone()),
@@ -580,8 +579,8 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
             let fa_ty = type_code(fa, e, cs)?;
             e.unify(&tr_ty, &fa_ty)
         }
-        Code::App(ref fn_name, ref args) => {
-            let mut ty = e.ty(fn_name)?.clone();
+        Code::App(ref fun, ref args) => {
+            let mut ty = e.ty(&fun.name()?)?.clone();
             //println!("app {} -> {}", fn_name, ty);
             let arg_tys: Vec<_> = args
                 .into_iter()

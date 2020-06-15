@@ -1,6 +1,7 @@
 #![feature(move_ref_pattern)]
 
 use logos::Logos;
+use std::cell::RefCell;
 use std::convert::From;
 use std::default::Default;
 use std::env::args;
@@ -13,8 +14,8 @@ mod error;
 mod expr;
 mod token;
 
-use code::{parse_term, run_code, type_code};
-use env::{Consts, Env, ExprEnvEntry};
+use code::{parse_term, run_code, type_code, Code};
+use env::{Consts, Env};
 use error::LfscError;
 use expr::{Expr, Program, Ref};
 use token::{Lexer, Token};
@@ -289,7 +290,12 @@ fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErr
     });
     e.bind(
         name.clone(),
-        cs.bot.clone(),
+        Rc::new(Expr::Program(Program {
+            name: name.clone(),
+            args,
+            ret_ty: ret_ty.clone(),
+            body: RefCell::new(Code::NatLit(rug::Integer::new())),
+        })),
         pgm_ty.clone(),
     );
     let body = parse_term(ts, e, cs)?;
@@ -298,18 +304,11 @@ fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErr
     for u in unbinds {
         e.unbind(u);
     }
-    let pgm = Rc::new(Expr::Program(Program {
-        args,
-        ret_ty,
-        body: Rc::new(body),
-    }));
-    e.types.insert(
-        name.clone(),
-        ExprEnvEntry {
-            val: pgm,
-            ty: pgm_ty,
-        },
-    );
+    if let Expr::Program(pgm) = e.expr_value(&name)?.as_ref() {
+        pgm.body.replace(body);
+    } else {
+        unreachable!()
+    }
     Ok(())
 }
 
