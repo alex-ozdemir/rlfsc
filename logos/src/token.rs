@@ -1,6 +1,7 @@
 use logos::{self, Logos};
 use std::str::from_utf8;
-use thiserror::Error;
+
+use crate::error::LfscError;
 
 use rug::{Integer, Rational};
 
@@ -117,16 +118,6 @@ impl<'a> std::convert::From<logos::Lexer<'a, Token>> for Lexer<'a> {
     }
 }
 
-#[derive(Error, Debug)]
-pub enum TokenError {
-    #[error("Reach end of file when expecting a token")]
-    UnexpectedEof,
-    #[error("Expect a {0:?}, but found token `{1:?}`")]
-    WrongToken(Token, Token),
-    #[error("Expect a {0}, but found token `{1:?}`")]
-    UnexpectedToken(&'static str, Token),
-}
-
 impl<'a> Lexer<'a> {
     pub fn next(&mut self) -> Option<Token> {
         self.peek_slice = self.inner.slice();
@@ -138,8 +129,8 @@ impl<'a> Lexer<'a> {
         //);
         n
     }
-    pub fn require_next(&mut self) -> Result<Token, TokenError> {
-        self.next().ok_or(TokenError::UnexpectedEof)
+    pub fn require_next(&mut self) -> Result<Token, LfscError> {
+        self.next().ok_or(LfscError::UnexpectedEof)
     }
     pub fn peek(&self) -> Option<Token> {
         self.peek
@@ -159,20 +150,20 @@ impl<'a> Lexer<'a> {
     pub fn rat(&self) -> Rational {
         Rational::from_str_radix(self.str(), 10).unwrap()
     }
-    pub fn consume_tok(&mut self, t: Token) -> Result<(), TokenError> {
+    pub fn consume_tok(&mut self, t: Token) -> Result<(), LfscError> {
         let f = self.require_next()?;
         if &f == &t {
             Ok(())
         } else {
-            Err(TokenError::WrongToken(t, f))
+            Err(LfscError::WrongToken(t, f))
         }
     }
-    pub fn consume_ident(&mut self) -> Result<&'a str, TokenError> {
+    pub fn consume_ident(&mut self) -> Result<&'a str, LfscError> {
         let t = self.require_next()?;
         if let Token::Ident = t {
             Ok(self.str())
         } else {
-            Err(TokenError::WrongToken(Token::Ident, t))
+            Err(LfscError::WrongToken(Token::Ident, t))
         }
     }
 }

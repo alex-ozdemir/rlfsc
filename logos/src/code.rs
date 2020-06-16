@@ -2,14 +2,22 @@ use std::convert::From;
 use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
 use std::str::FromStr;
-use thiserror::Error;
 
 use rug::{Integer, Rational};
 
 use crate::env::{Consts, Env};
 use crate::error::LfscError;
 use crate::expr::{Expr, Ref};
-use crate::token::{Lexer, Token, TokenError};
+use crate::token::{Lexer, Token};
+
+macro_rules! try_ {
+    ($e:expr) => {
+        match $e {
+            Ok(o) => o,
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern {
@@ -109,26 +117,8 @@ impl Code {
     }
 }
 
-#[derive(Error, Debug)]
-pub enum CodeParseError {
-    #[error("No expression in a do form")]
-    EmptyDo,
-    #[error("No cases in a match form")]
-    EmptyMatch,
-    #[error("Expect a {0}, but found token `{1:?}`")]
-    UnexpectedToken(&'static str, Token),
-    #[error("TokenError: {0}")]
-    TokenError(TokenError),
-}
-
-impl From<TokenError> for CodeParseError {
-    fn from(o: TokenError) -> Self {
-        Self::TokenError(o)
-    }
-}
-
 fn consume_new_ref(ts: &mut Lexer) -> Result<Rc<Ref>, LfscError> {
-    Ok(Rc::new(Ref::new(ts.consume_ident()?.to_owned())))
+    Ok(Rc::new(Ref::new(try_!(ts.consume_ident()).to_owned())))
 }
 
 pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, LfscError> {
@@ -148,7 +138,7 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
                     if let Some(last) = terms.pop() {
                         Ok(Code::Do(terms, Box::new(last)))
                     } else {
-                        Err(CodeParseError::EmptyDo)
+                        Err(LfscError::EmptyDo)
                     }
                 }
                 Match => {
@@ -158,7 +148,7 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
                         cases.push(parse_case(ts, e, cs)?);
                     }
                     if cases.len() == 0 {
-                        Err(CodeParseError::EmptyMatch)
+                        Err(LfscError::EmptyMatch)
                     } else {
                         Ok(Code::Match(Box::new(disc), cases))
                     }
@@ -225,17 +215,15 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
                     }
                     Ok(Code::App(fun, args))
                 }
-                t => Err(CodeParseError::from(TokenError::UnexpectedToken(
+                t => Err(LfscError::UnexpectedToken(
                     "term head",
                     t,
-                ))),
+                )),
             }?;
             ts.consume_tok(Token::Close)?;
             Ok(r)
         }
-        t => Err(LfscError::from(CodeParseError::from(
-            TokenError::UnexpectedToken("term", t),
-        ))),
+        t => Err(LfscError::UnexpectedToken("term", t)),
     }
 }
 
@@ -271,9 +259,7 @@ fn parse_case(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Pattern, Code
             parse_term(ts, e, cs)?,
         )),
         Token::Default => Ok((Pattern::Default, parse_term(ts, e, cs)?)),
-        t => Err(LfscError::from(CodeParseError::from(
-            CodeParseError::UnexpectedToken("case", t),
-        ))),
+        t => Err(LfscError::UnexpectedToken("case", t)),
     }?;
     ts.consume_tok(Token::Close)?;
     Ok(r)
@@ -366,12 +352,12 @@ impl Display for Code {
 
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
     //eprintln!("Run: {}", code);
-    let r = match code {
+    let r = try_!(match code {
         Code::App(ref fun, ref arg_terms) => {
-            let args = arg_terms
+            let args = try_!(arg_terms
                 .iter()
                 .map(|a| run_code(e, cs, a))
-                .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>());
             match fun.as_ref() {
                 Expr::Program(pgm) => {
                     let formal_args = pgm.args.clone();
@@ -382,7 +368,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                             .zip(args.iter())
                             .map(|((ref_, _), a)| ref_.val.replace(Some(a.clone())))
                             .collect();
-                        let r = run_code(e, cs, &body)?;
+                        let r = try_!(run_code(e, cs, &body));
                         for (u, (n, _)) in unbinds.into_iter().zip(formal_args.iter()) {
                             n.val.replace(u);
                         }
@@ -402,20 +388,20 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
         Code::RatLit(r) => Ok(Rc::new(Expr::RatLit(r.clone()))),
         Code::Do(xs, y) => {
             for x in xs {
-                run_code(e, cs, x)?;
+                try_!(run_code(e, cs, x));
             }
             run_code(e, cs, y)
         }
         Code::Let(n, v, body) => {
-            let vv = run_code(e, cs, v)?;
+            let vv = try_!(run_code(e, cs, v));
             let o = n.val.replace(Some(vv));
-            let r = run_code(e, cs, body)?;
+            let r = try_!(run_code(e, cs, body));
             n.val.replace(o);
             Ok(r)
         }
         Code::Cond(c, l, r, t, f) => {
-            let ll = run_code(e, cs, l)?;
-            let rr = run_code(e, cs, r)?;
+            let ll = try_!(run_code(e, cs, l));
+            let rr = try_!(run_code(e, cs, r));
             if match c {
                 Cond::Equal => Rc::into_raw(ll) == Rc::into_raw(rr),
                 Cond::LessThan => Rc::into_raw(ll) < Rc::into_raw(rr),
@@ -425,18 +411,18 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                 run_code(e, cs, f)
             }
         }
-        Code::NatToRat(i) => match run_code(e, cs, i)?.as_ref() {
+        Code::NatToRat(i) => match try_!(run_code(e, cs, i)).as_ref() {
             Expr::NatLit(x) => Ok(Rc::new(Expr::RatLit(Rational::new() + x))),
             x => Err(LfscError::NotMpzInMpzToMpq((*x).clone())),
         },
-        Code::Fail(i) => Err(LfscError::Fail((*run_code(e, cs, i)?).clone())),
-        Code::MpNeg(i) => run_code(e, cs, i)?.as_ref().mp_neg().map(Rc::new),
-        Code::MpBin(o, i, j) => run_code(e, cs, i)?
+        Code::Fail(i) => Err(LfscError::Fail((*try_!(run_code(e, cs, i))).clone())),
+        Code::MpNeg(i) => try_!(run_code(e, cs, i)).as_ref().mp_neg().map(Rc::new),
+        Code::MpBin(o, i, j) => try_!(run_code(e, cs, i))
             .as_ref()
-            .mp_bin(*o, run_code(e, cs, j)?.as_ref())
+            .mp_bin(*o, try_!(run_code(e, cs, j)).as_ref())
             .map(Rc::new),
-        Code::MpCond(o, i, j, k) => match run_code(e, cs, i)?.as_ref() {
-            Expr::NatLit(x) => {
+        Code::MpCond(o, i, j, k) => match try_!(run_code(e, cs, i)).as_ref() {
+            Expr::NatLit(ref x) => {
                 if match o {
                     MpCond::Neg => x < &(0 as u64),
                     MpCond::Zero => x == &(0 as u64),
@@ -446,7 +432,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                     run_code(e, cs, k)
                 }
             }
-            Expr::RatLit(x) => {
+            Expr::RatLit(ref x) => {
                 if match o {
                     MpCond::Neg => x < &(0 as u64),
                     MpCond::Zero => x == &(0 as u64),
@@ -459,7 +445,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             t => Err(LfscError::NotMpInMpCond(*o, t.clone())),
         },
         Code::Match(disc, cases) => {
-            let d = Expr::deref_holes(run_code(e, cs, disc)?);
+            let d = Expr::deref_holes(try_!(run_code(e, cs, disc)));
             for (pat, v) in cases.iter() {
                 match pat {
                     Pattern::Default => return run_code(e, cs, v),
@@ -477,7 +463,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                                         .zip(dargs.iter())
                                         .map(|(ref_, a)| ref_.val.replace(Some(a.clone())))
                                         .collect();
-                                    let r = run_code(e, cs, v)?;
+                                    let r = try_!(run_code(e, cs, v));
                                     for (u, n) in unbinds.into_iter().zip(vars.iter()) {
                                         n.val.replace(u);
                                     }
@@ -501,12 +487,12 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             ))
         }
         Code::Mark(n, i) => {
-            let v = run_code(e, cs, i)?;
+            let v = try_!(run_code(e, cs, i));
             e.toggle_mark(v.clone(), *n)
         }
         Code::IfMarked(n, c, t, f) => {
-            let cond = run_code(e, cs, c)?;
-            if e.get_mark(cond, *n)? {
+            let cond = try_!(run_code(e, cs, c));
+            if try_!(e.get_mark(cond, *n)) {
                 run_code(e, cs, t)
             } else {
                 run_code(e, cs, f)
@@ -519,7 +505,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                 _ => Ok(r),
             }
         }
-    }?;
+    });
     //println!("  => {}", r);
     Ok(r)
 }

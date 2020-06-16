@@ -1,7 +1,7 @@
 
 use crate::expr::Expr;
-use crate::code::{CodeParseError, MpBinOp, MpCond, Pattern};
-use crate::token::{Token, TokenError};
+use crate::code::{MpBinOp, MpCond, Pattern};
+use crate::token::{Token};
 
 use thiserror::Error;
 
@@ -37,10 +37,6 @@ pub enum LfscError {
     RunWrongResult(Expr, Expr),
     #[error("Input types to mp_* must be rational or natural, not {0:?}")]
     BadMqExpr(Expr),
-    #[error("TokenError: {0}")]
-    TokenError(TokenError),
-    #[error("CodeParseError: {0}")]
-    CodeParseError(CodeParseError),
     #[error("The identifier {2} is an {1} but should be a {0}")]
     WrongIdentifierType(&'static str, &'static str, String),
     #[error("{0:?} cannot be applied to {1} and {2}, because one is not arithmetic")]
@@ -69,18 +65,11 @@ pub enum LfscError {
     NoPattern(Expr, Vec<Pattern>),
     #[error("{0} should be bound with {1} variables, but found {2} in {3}")]
     WrongBindingCount(Expr, usize, usize, Pattern),
+    #[error("Expect a {0:?}, but found token `{1:?}`")]
+    WrongToken(Token, Token),
+    #[error("No expression in a do form")]
+    EmptyDo,
+    #[error("No cases in a match form")]
+    EmptyMatch,
 }
-
-impl From<TokenError> for LfscError {
-    fn from(o: TokenError) -> Self {
-        Self::TokenError(o)
-    }
-}
-
-impl From<CodeParseError> for LfscError {
-    fn from(o: CodeParseError) -> Self {
-        Self::CodeParseError(o)
-    }
-}
-
 
