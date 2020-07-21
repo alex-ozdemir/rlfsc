@@ -1,5 +1,7 @@
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::fmt::{self, Display, Formatter};
+use std::iter::once;
 use std::rc::Rc;
 
 use rug::{Integer, Rational};
@@ -23,7 +25,6 @@ pub struct Program {
     /// The body of the function
     pub body: RefCell<Code>,
 }
-
 
 impl Ref {
     pub fn new(name: String) -> Self {
@@ -142,6 +143,31 @@ impl Expr {
         }
     }
 
+    pub fn free_vars(&self) -> HashSet<String> {
+        match self {
+            Expr::Ref(r) => once(r.name.clone()).collect(),
+            Expr::Pi { var, dom, rng, .. } => {
+                let mut f: HashSet<_> = dom
+                    .free_vars()
+                    .into_iter()
+                    .chain(rng.free_vars().into_iter())
+                    .collect();
+                f.remove(&var.name.clone());
+                f
+            }
+            Expr::App(h, ts) => {
+                let mut f = h.free_vars();
+                for t in ts {
+                    for a in t.free_vars() {
+                        f.insert(a);
+                    }
+                }
+                f
+            }
+            _ => HashSet::new(),
+        }
+    }
+
     pub fn deref(mut r: Rc<Expr>) -> Rc<Expr> {
         loop {
             let next = match Expr::deref_once(&r) {
@@ -199,7 +225,6 @@ impl Expr {
 
     pub fn sub(this: &Rc<Self>, name: &str, value: &Rc<Expr>) -> Rc<Self> {
         use Expr::*;
-        //eprintln!("Sub: {}/{} in {}", value, name, this);
         match this.as_ref() {
             &Ref(ref ref_) => {
                 if name == &ref_.name {

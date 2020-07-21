@@ -1,0 +1,3382 @@
+; se ft=lisp
+(declare bool type)
+(declare tt bool)
+(declare ff bool)
+
+(declare var type)
+
+(declare lit type)
+(declare pos (! x var lit))
+(declare neg (! x var lit))
+
+; Flip the polarity of the literal
+(program lit_flip ((l lit)) lit
+         (match l
+                ((pos v) (neg v))
+                ((neg v) (pos v))))
+
+(declare clause type)
+(declare cln clause)
+(declare clc (! x lit (! c clause clause)))
+
+; A list of clauses, CNF if interpretted as a formula,
+; but also sometimes just a list
+(declare cnf type)
+(declare cnfn cnf)
+(declare cnfc (! h clause (! t cnf cnf)))
+
+; constructs for general clauses for R, Q, satlem
+
+(declare concat_cl (! c1 clause (! c2 clause clause)))
+(declare clr (! l lit (! c clause clause)))
+
+; code to check resolutions
+
+(program clause_append ((c1 clause) (c2 clause)) clause
+  (match c1 (cln c2) ((clc l c1') (clc l (clause_append c1' c2)))))
+
+; we use marks as follows:
+; -- mark 1 to record if we are supposed to remove a positive occurrence of the variable.
+; -- mark 2 to record if we are supposed to remove a negative occurrence of the variable.
+; -- mark 3 if we did indeed remove the variable positively
+; -- mark 4 if we did indeed remove the variable negatively
+(program simplify_clause ((c clause)) clause
+  (match c
+    (cln cln)
+    ((clc l c1)
+      (match l
+        ; Set mark 1 on v if it is not set, to indicate we should remove it.
+        ; After processing the rest of the clause, set mark 3 if we were already
+        ; supposed to remove v (so if mark 1 was set when we began).  Clear mark3
+        ; if we were not supposed to be removing v when we began this call.
+        ((pos v)
+          (let m (ifmarked v tt (do (markvar v) ff))
+          (let c' (simplify_clause c1)
+            (match m
+              (tt (do (ifmarked3 v v (markvar3 v)) c'))
+              (ff (do (ifmarked3 v (markvar3 v) v) (markvar v) (clc l c')))))))
+        ; the same as the code for tt, but using different marks.
+        ((neg v)
+          (let m (ifmarked2 v tt (do (markvar2 v) ff))
+          (let c' (simplify_clause c1)
+            (match m
+              (tt (do (ifmarked4 v v (markvar4 v)) c'))
+              (ff (do (ifmarked4 v (markvar4 v) v) (markvar2 v) (clc l c')))))))))
+    ((concat_cl c1 c2) (clause_append (simplify_clause c1) (simplify_clause c2)))
+    ((clr l c1)
+      (match l
+        ; set mark 1 to indicate we should remove v, and fail if
+        ; mark 3 is not set after processing the rest of the clause
+        ; (we will set mark 3 if we remove a positive occurrence of v).
+        ((pos v)
+            (let m (ifmarked v tt (do (markvar v) ff))
+            (let m3 (ifmarked3 v (do (markvar3 v) tt) ff)
+            (let c' (simplify_clause c1)
+              (ifmarked3 v (do (match m3 (tt v) (ff (markvar3 v)))
+                                (match m (tt v) (ff (markvar v))) c')
+                          (fail clause))))))
+        ; same as the tt case, but with different marks.
+        ((neg v)
+            (let m2 (ifmarked2 v tt (do (markvar2 v) ff))
+            (let m4 (ifmarked4 v (do (markvar4 v) tt) ff)
+            (let c' (simplify_clause c1)
+              (ifmarked4 v (do (match m4 (tt v) (ff (markvar4 v)))
+                                (match m2 (tt v) (ff (markvar2 v))) c')
+                          (fail clause))))))
+   ))))
+
+
+; resolution proofs
+
+(declare holds (! c clause type))
+
+(declare R (! c1 clause (! c2 clause
+           (! u1 (holds c1)
+           (! u2 (holds c2)
+           (! n var
+            (holds (concat_cl (clr (pos n) c1)
+                     (clr (neg n) c2)))))))))
+
+(declare Q (! c1 clause (! c2 clause
+           (! u1 (holds c1)
+           (! u2 (holds c2)
+           (! n var
+            (holds (concat_cl (clr (neg n) c1)
+                     (clr (pos n) c2)))))))))
+
+(declare satlem_simplify
+                (! c1 clause
+                (! c2 clause
+                (! c3 clause
+                (! u1 (holds c1)
+                (! r (^ (simplify_clause c1) c2)
+                (! u2 (! x (holds c2) (holds c3))
+                   (holds c3))))))))
+
+(declare satlem
+  (! c clause
+  (! c2 clause
+  (! u (holds c)
+  (! u2 (! v (holds c) (holds c2))
+    (holds c2))))))
+
+
+; Returns a copy of `c` with any duplicate literals removed.
+; Never fails.
+; Uses marks 3 & 4. Expects them to be clear before hand, and leaves them clear
+; afterwards.
+(program clause_dedup ((c clause)) clause
+         (match c
+                (cln cln)
+                ((clc l rest)
+                 (match l
+                        ((pos v) (ifmarked3
+                                   v
+                                   (clause_dedup rest)
+                                   (do (markvar3 v)
+                                     (let result (clc (pos v) (clause_dedup rest))
+                                       (do (markvar3 v) result)))))
+                        ((neg v) (ifmarked4
+                                   v
+                                   (clause_dedup rest)
+                                   (do (markvar4 v)
+                                     (let result (clc (neg v) (clause_dedup rest))
+                                       (do (markvar4 v) result)))))))))
+
+(declare cnf_holds (! c cnf type))
+(declare cnfn_proof (cnf_holds cnfn))
+(declare cnfc_proof
+         (! c clause
+         (! deduped_c clause
+            (! rest cnf
+               (! proof_c (holds c)
+                  (! proof_rest (cnf_holds rest)
+                     (! sc (^ (clause_dedup c) deduped_c)
+                        (cnf_holds (cnfc c rest)))))))))
+
+; A little example to demonstrate simplify_clause.
+; It can handle nested clr's of both polarities,
+; and correctly cleans up marks when it leaves a
+; clr or clc scope.  Uncomment and run with
+; --show-runs to see it in action.
+;
+; (check
+;   (% v1 var
+;   (% u1 (holds (concat_cl (clr (neg v1) (clr (pos v1) (clc (pos v1) (clr (pos v1) (clc (pos v1) (clc (neg v1) cln))))))
+;                    (clc (pos v1) (clc (pos v1) cln))))
+;    (satlem _ _ _ u1 (\ x x))))))
+
+
+;(check
+;   (% v1 var
+;   (% u1 (holds (clr (neg v1) (concat_cl (clc (neg v1) cln)
+;                                      (clr (neg v1) (clc (neg v1) cln)))))
+;    (satlem _ _ _ u1 (\ x x))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; SMT syntax and semantics (not theory-specific)
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; depends on sat.plf
+
+(declare formula type)
+(declare th_holds (! f formula type))
+
+; standard logic definitions
+(declare true formula)
+(declare false formula)
+
+(define formula_op1
+	(! f formula
+	formula))
+
+(define formula_op2
+	(! f1 formula
+	(! f2 formula
+	   formula)))
+
+(define formula_op3
+	(! f1 formula
+	(! f2 formula
+	(! f3 formula
+	   formula))))
+
+(declare not formula_op1)
+(declare and formula_op2)
+(declare or formula_op2)
+(declare impl formula_op2)
+(declare iff formula_op2)
+(declare xor formula_op2)
+(declare ifte formula_op3)
+
+; terms
+(declare sort type)
+(declare term (! t sort type))	; declared terms in formula
+
+; standard definitions for =, ite, let and flet
+(declare = (! s sort
+           (! x (term s)
+           (! y (term s)
+             formula))))
+(declare ite (! s sort
+             (! f formula
+             (! t1 (term s)
+             (! t2 (term s)
+               (term s))))))
+; TODO(aozdemir) allow this.
+;(declare let (! s sort
+;             (! t (term s)
+;             (! f (! v (term s) formula)
+;               formula))))
+(declare flet (! f1 formula
+              (! f2 (! v formula formula)
+                formula)))
+
+; We view applications of predicates as terms of sort "Bool".
+; Such terms can be injected as atomic formulas using "p_app".
+(declare Bool sort)				; the special sort for predicates
+(declare p_app (! x (term Bool) formula))	; propositional application of term
+
+; boolean terms
+(declare t_true (term Bool))
+(declare t_false (term Bool))
+(declare t_t_neq_f
+ (th_holds (not (= Bool t_true t_false))))
+(declare pred_eq_t
+ (! x (term Bool)
+ (! u (th_holds (p_app x))
+   (th_holds (= Bool x t_true)))))
+
+(declare pred_eq_f
+ (! x (term Bool)
+ (! u (th_holds (not (p_app x)))
+   (th_holds (= Bool x t_false)))))
+
+(declare f_to_b
+  (! f formula
+    (term Bool)))
+
+(declare true_preds_equal
+  (! x1 (term Bool)
+  (! x2 (term Bool)
+  (! u1 (th_holds (p_app x1))
+  (! u2 (th_holds (p_app x2))
+    (th_holds (= Bool x1 x2)))))))
+
+(declare false_preds_equal
+  (! x1 (term Bool)
+  (! x2 (term Bool)
+  (! u1 (th_holds (not (p_app x1)))
+  (! u2 (th_holds (not (p_app x2)))
+    (th_holds (= Bool x1 x2)))))))
+
+(declare pred_refl_pos
+  (! x1 (term Bool)
+  (! u1 (th_holds (p_app x1))
+    (th_holds (= Bool x1 x1)))))
+
+(declare pred_refl_neg
+  (! x1 (term Bool)
+  (! u1 (th_holds (not (p_app x1)))
+    (th_holds (= Bool x1 x1)))))
+
+(declare pred_not_iff_f
+  (! x (term Bool)
+  (! u (th_holds (not (iff false (p_app x))))
+    (th_holds (= Bool t_true x)))))
+
+(declare pred_not_iff_f_2
+  (! x (term Bool)
+  (! u (th_holds (not (iff (p_app x) false)))
+    (th_holds (= Bool x t_true)))))
+
+(declare pred_not_iff_t
+  (! x (term Bool)
+  (! u (th_holds (not (iff true (p_app x))))
+    (th_holds (= Bool t_false x)))))
+
+(declare pred_not_iff_t_2
+  (! x (term Bool)
+  (! u (th_holds (not (iff (p_app x) true)))
+    (th_holds (= Bool x t_false)))))
+
+(declare pred_iff_f
+  (! x (term Bool)
+  (! u (th_holds (iff false (p_app x)))
+    (th_holds (= Bool t_false x)))))
+
+(declare pred_iff_f_2
+  (! x (term Bool)
+  (! u (th_holds (iff (p_app x) false))
+    (th_holds (= Bool x t_false)))))
+
+(declare pred_iff_t
+  (! x (term Bool)
+  (! u (th_holds (iff true (p_app x)))
+    (th_holds (= Bool t_true x)))))
+
+(declare pred_iff_t_2
+  (! x (term Bool)
+  (! u (th_holds (iff (p_app x) true))
+    (th_holds (= Bool x t_true)))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; CNF Clausification
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; binding between an LF var and an (atomic) formula
+
+(declare atom (! v var (! p formula type)))
+
+; binding between two LF vars
+(declare bvatom (! sat_v var (! bv_v var type)))
+
+(declare decl_atom
+  (! f formula
+  (! u (! v var
+       (! a (atom v f)
+         (holds cln)))
+    (holds cln))))
+
+;; declare atom enhanced with mapping
+;; between SAT prop variable and BVSAT prop variable
+(declare decl_bvatom
+  (! f formula
+  (! u (! v var
+       (! bv_v var
+       (! a (atom v f)
+       (! bva (atom bv_v f)
+       (! vbv (bvatom v bv_v)
+         (holds cln))))))
+    (holds cln))))
+
+
+; clausify a formula directly
+(declare clausify_form
+  (! f formula
+  (! v var
+  (! a (atom v f)
+  (! u (th_holds f)
+    (holds (clc (pos v) cln)))))))
+
+(declare clausify_form_not
+  (! f formula
+  (! v var
+  (! a (atom v f)
+  (! u (th_holds (not f))
+    (holds (clc (neg v) cln)))))))
+
+(declare clausify_false
+  (! u (th_holds false)
+    (holds cln)))
+
+(declare th_let_pf
+  (! f formula
+  (! u (th_holds f)
+  (! u2 (! v (th_holds f) (holds cln))
+    (holds cln)))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Natural deduction rules : used for CNF
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; for eager bit-blasting
+(declare iff_symm
+	(! f formula
+	   (th_holds (iff f f))))
+
+
+;; contradiction
+
+(declare contra
+  (! f formula
+  (! r1 (th_holds f)
+  (! r2 (th_holds (not f))
+    (th_holds false)))))
+
+; truth
+(declare truth (th_holds true))
+
+;; not not
+
+(declare not_not_intro
+  (! f formula
+  (! u (th_holds f)
+    (th_holds (not (not f))))))
+
+(declare not_not_elim
+  (! f formula
+  (! u (th_holds (not (not f)))
+    (th_holds f))))
+
+;; or elimination
+
+(declare or_elim_1
+  (! f1 formula
+  (! f2 formula
+  (! u1 (th_holds (not f1))
+  (! u2 (th_holds (or f1 f2))
+    (th_holds f2))))))
+
+(declare or_elim_2
+  (! f1 formula
+  (! f2 formula
+  (! u1 (th_holds (not f2))
+  (! u2 (th_holds (or f1 f2))
+    (th_holds f1))))))
+
+(declare not_or_elim
+  (! f1 formula
+  (! f2 formula
+  (! u2 (th_holds (not (or f1 f2)))
+    (th_holds (and (not f1) (not f2)))))))
+
+;; and elimination
+
+(declare and_elim_1
+  (! f1 formula
+  (! f2 formula
+  (! u (th_holds (and f1 f2))
+    (th_holds f1)))))
+
+(declare and_elim_2
+  (! f1 formula
+  (! f2 formula
+  (! u (th_holds (and f1 f2))
+    (th_holds f2)))))
+
+(declare not_and_elim
+  (! f1 formula
+  (! f2 formula
+  (! u2 (th_holds (not (and f1 f2)))
+    (th_holds (or (not f1) (not f2)))))))
+
+;; impl elimination
+
+(declare impl_intro (! f1 formula
+                    (! f2 formula
+                    (! i1 (! u (th_holds f1)
+                              (th_holds f2))
+                      (th_holds (impl f1 f2))))))
+
+(declare impl_elim
+  (! f1 formula
+  (! f2 formula
+  (! u2 (th_holds (impl f1 f2))
+    (th_holds (or (not f1) f2))))))
+
+(declare not_impl_elim
+  (! f1 formula
+  (! f2 formula
+  (! u (th_holds (not (impl f1 f2)))
+    (th_holds (and f1 (not f2)))))))
+
+;; iff elimination
+
+(declare iff_elim_1
+  (! f1 formula
+  (! f2 formula
+  (! u1 (th_holds (iff f1 f2))
+    (th_holds (or (not f1) f2))))))
+
+(declare iff_elim_2
+  (! f1 formula
+  (! f2 formula
+  (! u1 (th_holds (iff f1 f2))
+    (th_holds (or f1 (not f2)))))))
+
+(declare not_iff_elim
+  (! f1 formula
+  (! f2 formula
+  (! u2 (th_holds (not (iff f1 f2)))
+    (th_holds (iff f1 (not f2)))))))
+
+; xor elimination
+
+(declare xor_elim_1
+  (! f1 formula
+  (! f2 formula
+  (! u1 (th_holds (xor f1 f2))
+    (th_holds (or (not f1) (not f2)))))))
+
+(declare xor_elim_2
+  (! f1 formula
+  (! f2 formula
+  (! u1 (th_holds (xor f1 f2))
+    (th_holds (or f1 f2))))))
+
+(declare not_xor_elim
+  (! f1 formula
+  (! f2 formula
+  (! u2 (th_holds (not (xor f1 f2)))
+    (th_holds (iff f1 f2))))))
+
+;; ite elimination
+
+(declare ite_elim_1
+  (! a formula
+  (! b formula
+  (! c formula
+  (! u2 (th_holds (ifte a b c))
+    (th_holds (or (not a) b)))))))
+
+(declare ite_elim_2
+  (! a formula
+  (! b formula
+  (! c formula
+  (! u2 (th_holds (ifte a b c))
+    (th_holds (or a c)))))))
+
+(declare ite_elim_3
+  (! a formula
+  (! b formula
+  (! c formula
+  (! u2 (th_holds (ifte a b c))
+    (th_holds (or b c)))))))
+
+(declare not_ite_elim_1
+  (! a formula
+  (! b formula
+  (! c formula
+  (! u2 (th_holds (not (ifte a b c)))
+    (th_holds (or (not a) (not b))))))))
+
+(declare not_ite_elim_2
+  (! a formula
+  (! b formula
+  (! c formula
+  (! u2 (th_holds (not (ifte a b c)))
+    (th_holds (or a (not c))))))))
+
+(declare not_ite_elim_3
+  (! a formula
+  (! b formula
+  (! c formula
+  (! u2 (th_holds (not (ifte a b c)))
+    (th_holds (or (not b) (not c))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; For theory lemmas
+; - make a series of assumptions and then derive a contradiction (or false)
+; - then the assumptions yield a formula like "v1 -> v2 -> ... -> vn -> false"
+; - In CNF, it becomes a clause: "~v1, ~v2, ..., ~vn"
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(declare ast
+  (! v var
+  (! f formula
+  (! C clause
+  (! r (atom v f)       ;this is specified
+  (! u (! o (th_holds f)
+         (holds C))
+    (holds (clc (neg v) C))))))))
+
+(declare asf
+  (! v var
+  (! f formula
+  (! C clause
+  (! r (atom v f)
+  (! u (! o (th_holds (not f))
+         (holds C))
+    (holds (clc (pos v) C))))))))
+
+;; Bitvector lemma constructors to assume
+;; the unit clause containing the assumptions
+;; it also requires the mapping between bv_v and v
+;; The resolution proof proving false will use bv_v as the definition clauses use bv_v
+;; but the Problem clauses in the main SAT solver will use v so the learned clause is in terms of v
+(declare bv_asf
+  (! v var
+  (! bv_v var
+  (! f formula
+  (! C clause
+  (! r (atom v f) ;; passed in
+  (! x (bvatom v bv_v) ; establishes the equivalence of v to bv_
+  (! u (! o (holds (clc (neg bv_v) cln)) ;; l binding to be used in proof
+         (holds C))
+    (holds (clc (pos v) C))))))))))
+
+(declare bv_ast
+  (! v var
+  (! bv_v var
+  (! f formula
+  (! C clause
+  (! r (atom v f)       ; this is specified
+  (! x (bvatom v bv_v) ; establishes the equivalence of v to bv_v
+  (! u (! o (holds (clc (pos bv_v) cln))
+         (holds C))
+    (holds (clc (neg v) C))))))))))
+
+;; Numeric primitives
+
+(program mpz_sub ((x mpz) (y mpz)) mpz
+	 (mp_add x (mp_mul (~1) y)))
+
+(program mp_ispos ((x mpz)) formula
+	 (mp_ifneg x false true))
+
+(program mpz_eq ((x mpz) (y mpz)) formula
+    (mp_ifzero (mpz_sub x y) true false))
+
+(program mpz_lt ((x mpz) (y mpz)) formula
+    (mp_ifneg (mpz_sub x y) true false))
+
+(program mpz_lte ((x mpz) (y mpz)) formula
+    (mp_ifneg (mpz_sub x y) true (mpz_eq x y)))
+
+;; Example:
+;;
+;; Given theory literals (F1....Fn), and an input formula A of the form (th_holds (or F1 (or F2 .... (or F{n-1} Fn))))).
+;;
+;; We introduce atoms (a1,...,an) to map boolean literals (v1,...,vn) top literals (F1,...,Fn).
+;; Do this at the beginning of the proof:
+;;
+;; (decl_atom F1 (\ v1 (\ a1
+;; (decl_atom F2 (\ v2 (\ a2
+;; ....
+;; (decl_atom Fn (\ vn (\ an
+;;
+;;  A is then clausified by the following proof:
+;;
+;;(satlem _ _
+;;(asf _ _ _ a1 (\ l1
+;;(asf _ _ _ a2 (\ l2
+;;...
+;;(asf _ _ _ an (\ ln
+;;(clausify_false
+;;
+;;   (contra _
+;;      (or_elim_1 _ _ l{n-1}
+;;	...
+;;      (or_elim_1 _ _ l2
+;; 	(or_elim_1 _ _ l1 A))))) ln)
+;;
+;;))))))) (\ C
+;;
+;; We now have the free variable C, which should be the clause (v1 V ... V vn).
+;;
+;; Polarity of literals should be considered, say we have A of the form (th_holds (or (not F1) (or F2 (not F3)))).
+;; Where necessary, we use "ast" instead of "asf", introduce negations by "not_not_intro" for pattern matching, and flip
+;; the arguments of contra:
+;;
+;;(satlem _ _
+;;(ast _ _ _ a1 (\ l1
+;;(asf _ _ _ a2 (\ l2
+;;(ast _ _ _ a3 (\ l3
+;;(clausify_false
+;;
+;;   (contra _ l3
+;;      (or_elim_1 _ _ l2
+;; 	(or_elim_1 _ _ (not_not_intro l1) A))))
+;;
+;;))))))) (\ C
+;;
+;; C should be the clause (~v1 V v2 V ~v3 )
+; LRAT Proof signature
+; LRAT format detailed in "Efficient Certified RAT Verification"
+; Link: https://www.cs.utexas.edu/~marijn/publications/lrat.pdf
+; Author: aozdemir
+; Depends On: sat.plf, smt.plf
+
+
+; A general note about the design of the side conditions:
+;  Some side-conditions make use of a _global assignment_ encoded in
+;  0 (true) / 1 (false) marks on variables.
+
+; Unit (https://en.wikipedia.org/wiki/Unit_type)
+; For functions that don't return anything
+(declare Unit type) ; The type with only one value (like `void` in C)
+(declare unit Unit) ; That value
+
+; Boolean operator (not short-circuiting)
+(program bool_or ((l bool) (r bool)) bool (match l (ff r) (tt tt)))
+(program bool_and ((l bool) (r bool)) bool (match l (tt r) (ff ff)))
+(program bool_not ((b bool)) bool (match b (tt ff) (ff tt)))
+(program bool_eq ((l bool) (r bool)) bool
+         (match l
+                (tt (match r
+                           (tt tt)
+                           (ff ff)))
+                (ff (match r
+                           (tt ff)
+                           (ff tt)))))
+
+; =================== ;
+; Working CNF formula ;
+; =================== ;
+
+; Represents a CNF formula as a map from clause indices to clauses
+; Should be sorted ascending, always!
+; Here, and for all collections, the suffix "n" denotes the empty collection and
+; the suffix "c" denotes the constructor for the collection in the style of lisp's
+; "cons cells"
+(declare CMap type)
+(declare CMapn CMap)
+(declare CMapc (! i mpz (! c clause (! r CMap CMap))))
+
+; ================= ;
+; LRAT Proof Format ;
+; ================= ;
+
+; CI lists are lists of clause indices.
+; They represent clauses to delete.
+; They must be sorted.
+(declare CIList type)
+(declare CIListn CIList)
+(declare CIListc (! z mpz (! zs CIList CIList)))
+
+; Traces are a list of clause indices into the working CNF formula
+; They represent the clauses that will be unit in a unit propegation to bottom
+; Thus their elements are *not* in value order.
+(declare Trace type)
+(declare Tracen Trace)
+(declare Tracec (! z mpz (! zs Trace Trace)))
+
+; RAT Hint list
+; Each hint is
+;   * An index indicating a clause in the working CNF formula to resolve with
+;   * A trace indicating how UP should be done after that resolution
+(declare RATHints type)
+(declare RATHintsn RATHints)
+(declare RATHintsc
+         (! target mpz
+            (! trace Trace
+               (! rest RATHints
+                  RATHints))))
+
+; LRAT proof
+(declare LRATProof type)
+(declare LRATProofn LRATProof)
+; Deletion (includes a list of clause indices to delete)
+(declare LRATProofd (! cis CIList (! rest LRATProof LRATProof)))
+; Addition: a clause index, a clause, RUP trace for that clause, and hints for
+; what resolutions should happen then, and how those resolutions imply bottom
+; via UP.
+; If the list of hints is empty, then bottom is already implied.
+(declare LRATProofa
+         (! ci mpz
+            (! c clause
+               (! t Trace
+                  (! h RATHints
+                     (! rest LRATProof
+                        LRATProof))))))
+
+; ========================================== ;
+; Functional programs for manipulating types ;
+; ========================================== ;
+
+; Are two literal equal?
+(program lit_eq ((l1 lit) (l2 lit)) bool
+         (match l1
+                ((pos v1) (match l2
+                                 ((pos v2) (ifequal v1 v2 tt ff))
+                                 ((neg v2) ff)))
+                ((neg v1) (match l2
+                                 ((pos v2) ff)
+                                 ((neg v2) (ifequal v1 v2 tt ff))))))
+
+; Remove **all** occurences of a literal from clause
+(program clause_remove_all ((l lit) (c clause)) clause
+         (match c
+                (cln cln)
+                ((clc l' c')
+                 (let rest_res (clause_remove_all l c')
+                   (match (lit_eq l l')
+                          (tt rest_res)
+                          (ff (clc l' rest_res)))))))
+
+; Return the clause's first  literal
+; fails on an empty clause
+(program clause_head ((c clause)) lit
+         (match c
+                (cln (fail lit))
+                ((clc l c') l)))
+
+; Does a clause contain some literal?
+(program clause_contains_lit ((c clause) (l lit)) bool
+         (match c
+                ((clc l' c') (match (lit_eq l l')
+                                    (tt tt)
+                                    (ff (clause_contains_lit c' l))))
+                (cln ff)))
+
+; Append two traces
+(program Trace_concat ((t1 Trace) (t2 Trace)) Trace
+         (match t1
+                (Tracen t2)
+                ((Tracec h1 r1) (Tracec h1 (Trace_concat r1 t2)))))
+
+; Return whether a list of RAT hits is empty
+(program RATHints_is_empty ((h RATHints)) bool
+         (match h
+                (RATHintsn tt)
+                ((RATHintsc a b c) ff)))
+
+; Insert into a CMap, preserving order
+(program CMap_insert ((i mpz) (c clause) (cs CMap)) CMap
+         (match cs
+                (CMapn (CMapc i c CMapn))
+                ((CMapc i' c' r)
+                 (mp_ifneg (mpz_sub i i')
+                        (CMapc i c cs)
+                        (CMapc i' c' (CMap_insert i c r))))))
+
+; Get from a CMap
+(program CMap_get ((i mpz) (cs CMap)) clause
+         (match cs
+                (CMapn (fail clause))
+                ((CMapc i' c r)
+                 (mp_ifzero (mpz_sub i i')
+                        c
+                        (CMap_get i r)))))
+
+; Remove from CMap. Only removes one element.
+(program CMap_remove ((i mpz) (cs CMap)) CMap
+         (match cs
+                (CMapn CMapn)
+                ((CMapc i' c r)
+                 (mp_ifzero (mpz_sub i i')
+                        r
+                        (CMapc i' c (CMap_remove i r))))))
+
+; Remove many indices from a CMap. Asuumes the input list is sorted.
+(program CMap_remove_many ((is CIList) (cs CMap)) CMap
+         (match
+           is
+           (CIListn cs)
+           ((CIListc i is')
+            (match
+              cs
+              (CMapn (fail CMap)) ; All deletion indices must be valid!
+              ((CMapc ci c cs')
+               (mp_ifzero (mpz_sub i ci)
+                       (CMap_remove_many is' cs')
+                       (CMapc ci c (CMap_remove_many is cs'))))))))
+
+; Given a map of clauses and a literal, return all indices in the map
+; corresponsing to clauses that could resolve against that literal. i.e. for x,
+; return the indices of all clauses containing x.
+(program collect_resolution_targets_w_lit ((cs CMap) (l lit)) CIList
+         (match cs
+                (CMapn CIListn)
+                ((CMapc i c cs')
+                 (let rest_solution (collect_resolution_targets_w_lit cs' l)
+                   (match (clause_contains_lit c l)
+                        (tt (CIListc i rest_solution))
+                        (ff rest_solution))))))
+
+; Given a clause and a maps of clauses, return all indices in the map
+; corresponding to clauses which could resolve with this one on its first
+; literal
+(program collect_resolution_targets ((cs CMap) (c clause)) CIList
+         (collect_resolution_targets_w_lit cs (lit_flip (clause_head c))))
+
+; Is this clause a tautology?
+; Internally uses mark 5 to flag variables that occur (+)
+; and mark 6 to flag variables that occur (-)
+(program is_t ((c clause)) bool
+         (match
+           c
+           (cln ff)
+           ((clc l c') (match
+                         l
+                         ((pos v)
+                          (ifmarked5
+                            v
+                            (is_t c')
+                            (ifmarked6
+                              v
+                              tt
+                              (do
+                                (markvar5 v)
+                                (let r (is_t c') (do (markvar5 v) r))))))
+                         ((neg v)
+                          (ifmarked6
+                            v
+                            (is_t c')
+                            (ifmarked5
+                              v
+                              tt
+                              (do
+                                (markvar6 v)
+                                (let r (is_t c') (do (markvar6 v) r))))))))))
+
+; ===================================================================== ;
+; Programs for manipulating and querying the global variable assignment ;
+; ===================================================================== ;
+
+; This assignment marks values of type `var`.
+; It marks a variable with 1 if that variable is true
+; It marks a variable with 2 if that variable is false
+; A variable should not be marked with both!
+; A variable may be marked with neither, indicating that variable is presently
+; unassigned, which we call "floating".
+
+; Mark the variable within to satisfy this literal.
+; fails if the literal is already UNSAT
+(program lit_mk_sat ((l lit)) Unit
+         (match l
+                ((pos v) (ifmarked2 v
+                                    (fail Unit)
+                                    (ifmarked1 v unit (do (markvar1 v) unit))))
+                ((neg v) (ifmarked1 v
+                                    (fail Unit)
+                                    (ifmarked2 v unit (do (markvar2 v) unit))))))
+
+; Mark the variable within to falsify this literal.
+; fails is the literal is already SAT
+(program lit_mk_unsat ((l lit)) Unit
+         (match l
+                ((neg v) (ifmarked2 v
+                                    (fail Unit)
+                                    (ifmarked1 v unit (do (markvar1 v) unit))))
+                ((pos v) (ifmarked1 v
+                                    (fail Unit)
+                                    (ifmarked2 v unit (do (markvar2 v) unit))))))
+
+; Unmarks the variable within a satified literal to render it neither satified nor falsified
+; fails if the literal is not already satisfied
+(program lit_un_mk_sat ((l lit)) Unit
+         (match l
+                ((pos v) (ifmarked1 v (do (markvar1 v) unit) (fail Unit)))
+                ((neg v) (ifmarked2 v (do (markvar2 v) unit) (fail Unit)))))
+
+; Unmarks the variable within a falsified literal to render it neither satified nor falsified
+; fails if the literal is not already falsified
+(program lit_un_mk_unsat ((l lit)) Unit
+         (match l
+                ((pos v) (ifmarked2 v (do (markvar2 v) unit) (fail Unit)))
+                ((neg v) (ifmarked1 v (do (markvar1 v) unit) (fail Unit)))))
+
+;  Is a literal presently satisfied?
+(program lit_is_sat ((l lit)) bool
+         (match l
+                ((pos v) (ifmarked1 v tt ff))
+                ((neg v) (ifmarked2 v tt ff))))
+
+;  Is a literal presently falsified?
+(program lit_is_unsat ((l lit)) bool
+         (match l
+                ((pos v) (ifmarked2 v tt ff))
+                ((neg v) (ifmarked1 v tt ff))))
+
+;  Is a  literal presently neither satisfied nor falsified?
+(program lit_is_floating ((l lit)) bool
+         (bool_not (bool_or (lit_is_sat l) (lit_is_unsat l))))
+
+; Does this clause contain a floating literal?
+(program clause_has_floating ((c clause)) bool
+         (match c
+                (cln ff)
+                ((clc l c') (match (lit_is_floating l)
+                                   (tt tt)
+                                   (ff (clause_has_floating c'))))))
+
+; Is this clause falsified? i.e. are all its clauses falsified?
+(program clause_is_unsat ((c clause)) bool
+         (match c
+                (cln tt)
+                ((clc l c') (match (lit_is_unsat l)
+                                   (tt (clause_is_unsat c'))
+                                   (ff ff)))))
+
+; Is this clause presently satisfied?
+(program clause_is_sat ((c clause)) bool
+         (match c
+                (cln ff)
+                ((clc l c') (match (lit_is_sat l)
+                                   (tt tt)
+                                   (ff (clause_is_sat c'))))))
+
+; Falsify **all** contained literals.
+; Fails on a tautological clause
+(program clause_mk_all_unsat ((c clause)) Unit
+         (match c
+                (cln unit)
+                ((clc l c') (do
+                              (lit_mk_unsat l)
+                              (clause_mk_all_unsat c')))))
+
+; Unfalsifies **all** contained literals
+; Fails on a clause with duplicate literals
+(program clause_un_mk_all_unsat ((c clause)) Unit
+         (match c
+                (cln unit)
+                ((clc l c') (do
+                              (lit_un_mk_unsat l)
+                              (clause_un_mk_all_unsat c')))))
+
+; Get the first floating literal out of this clause.
+; fails if there are no floating literals
+(program clause_first_floating ((c clause)) lit
+         (match c
+                (cln (fail lit))
+                ((clc l c') (match (lit_is_floating l)
+                                   (tt l)
+                                   (ff (clause_first_floating c'))))))
+
+; ===================================== ;
+; High-Level Programs for LRAT Checking ;
+; ===================================== ;
+
+; The return type for verifying that a clause is unit and modifying the global
+; assignment to satisfy it
+(declare MarkResult type)
+; The clause is unit, and this is the (previoiusly floating) literal that is now satified.
+(declare MRUnit (! l lit MarkResult))
+; The clause was unsat!
+(declare MRUnsat MarkResult)
+; The clauss was already satisfied.
+(declare MRSat MarkResult)
+; The clause had multiple floating literals.
+(declare MRNotUnit MarkResult)
+
+; Determine wether this clause is sat, unsat, unit, or not unit, and if it is
+; unit, it modifies the global assignment to satisfy the clause, and returns
+; the literal that was made SAT by the new mark.
+;
+; If `c` is a tautology, reports `MRSat`, since it is (trivially) satisfied.
+(program clause_check_unit_and_maybe_mark ((c clause)) MarkResult
+         (match (clause_is_sat c)
+                (tt MRSat)
+                (ff (match (clause_is_unsat c)
+                           (tt MRUnsat)
+                           (ff (match (is_t c)
+                                      (tt MRSat)
+                                      (ff ; Dedent
+         (match (clause_has_floating c)
+                (tt (let first (clause_first_floating c)
+                      (do (lit_mk_sat first)
+                        (match (clause_has_floating c)
+                               (tt (do (lit_un_mk_sat first) MRNotUnit))
+                                      (ff (MRUnit first))))))
+                ; Unreachable. If clause is not floating it must have been SAT or UNSAT.
+                (ff (fail MarkResult))
+                ))))))))
+
+; The return type for the process of Trace-guided unit propegation
+(declare UPResult type)
+; The trace guided unit propegation correctly, but that unit propegation did not end in an empty clause
+(declare UPR_Ok UPResult)
+; The trace guided unit propegation correctly to an empty clause
+(declare UPR_Bottom UPResult)
+; The trace was malformed,
+;; i.e. at some point indicates that a non-unit, non-empty clause should be examined
+(declare UPR_Broken UPResult)
+
+; Execute the unit propegation indicated by the trace. Report whether that
+; unit propegation succeeds and produces bottom, fails, or succeeds but does
+; not produce bottom.
+;
+; If the trace tries to propegate through a TAUT clause, fails.
+(program do_up ((cs CMap) (t Trace)) UPResult
+         (match
+           t
+           (Tracen UPR_Ok)
+           ((Tracec i r) (match (clause_check_unit_and_maybe_mark (CMap_get i cs))
+                                ((MRUnit l)
+                                 (let res (do_up cs r)
+                                   (do (lit_un_mk_sat l) res)))
+                                (MRUnsat UPR_Bottom)
+                                (MRSat UPR_Broken)
+                                (MRNotUnit UPR_Broken)))))
+
+
+; Determine whether a list of indices agrees with the list of indices latent in
+; a list of hints. Both lists should be sorted.
+(program resolution_targets_match (
+                                   (computed CIList)
+                                   (given RATHints)) bool
+         (match given
+                (RATHintsn
+                  (match computed
+                         (CIListn tt)
+                         ((CIListc a b) ff)))
+                ((RATHintsc hint_idx t given')
+                 (match computed
+                        ((CIListc comp_idx computed')
+                         (mp_ifzero (mpz_sub hint_idx comp_idx)
+                                    (resolution_targets_match computed' given')
+                                    (ff)))
+                        (CIListn ff)))))
+
+
+; Determines whether `t` is a witness that `c` is an Assymetric Tautology in `cs`.
+;
+; Does unit propegation in the formula `cs`, beginning by falsifying
+; all literals in `c`, and then looking at the clauses indicated by `t`.
+; Assumes no marks, and cleans up marks afterwards.
+;
+; Fails if `c` has duplicates
+(program is_at_trace ((cs CMap) (c clause) (t Trace)) UPResult
+         (match (is_t c)
+                (ff
+                  (do
+                    (clause_mk_all_unsat c)
+                    (let result (do_up cs t)
+                      (do (clause_un_mk_all_unsat c) result))))
+                (tt
+                  UPR_Bottom)))
+
+
+
+; List of (clause, trace) pairs
+(declare CTPairs type)
+(declare CTPn CTPairs)
+(declare CTPc (! c clause (! t Trace (! rest CTPairs CTPairs))))
+
+; For each RAT hint, construct the pseudo-resolvant for that hint, and the net
+; trace for that hint. Return a list of these.
+;
+; Pseudo resolvant: if l v C is the clause, and D is another clause containing
+; ~l, then l v C v (D \ ~l) is the pseudo-resolvant, which is the actual
+; resolant, plut l, which would be implied by UP.
+;
+; The net trace is the global trace (`t`), plut the trace for that specific
+; resolvant.
+(program construct_ct_pairs (
+                             (cs CMap)
+                             (c clause)
+                             (t Trace)
+                             (hints RATHints)
+                            ) CTPairs
+         (match hints
+                (RATHintsn CTPn)
+                ((RATHintsc i ht hints')
+                 (CTPc
+                   (clause_dedup (clause_append c
+                                  (clause_remove_all (lit_flip (clause_head c))
+                                                     (CMap_get i cs))))
+                   (Trace_concat t ht)
+                   (construct_ct_pairs cs c t hints')))))
+
+; Goes through a list of clause, trace pairs and verifies that each clause is
+; an AT via that trace.
+; Fails if any putative AT is a TAUT or contains duplicates
+(program are_all_at_trace (
+                     (cs CMap)
+                     (l CTPairs)
+                    ) UPResult
+         (match l
+                (CTPn UPR_Bottom)
+                ((CTPc c t l')
+                 (match (is_at_trace cs c t)
+                        (UPR_Ok UPR_Ok)
+                        (UPR_Broken UPR_Broken)
+                        (UPR_Bottom (are_all_at_trace cs l'))))))
+
+; Is this trace, and list of hints, proof that `c` is an Resolution Assymeytic
+; Tautology?
+; Fails is the hints are empty (which means `c` should  be AT) and `c` contains
+; duplicates)
+(program is_rat_trace ((cs CMap) (c clause) (t Trace) (hints RATHints)) UPResult
+         (match
+           (RATHints_is_empty hints)
+           (tt ; Empty RAT hints -- the clause must be AT
+             (is_at_trace cs c t))
+           (ff ; Ew -- we must verify this is a RAT
+             (match (resolution_targets_match
+                      (collect_resolution_targets cs c)
+                      hints)
+                    (ff ; Resolution targets disagree with hints.
+                      UPR_Broken)
+                    (tt
+                      (are_all_at_trace cs (construct_ct_pairs cs c t hints)))))))
+
+; Is this proof an LRAT proof of bottom?
+; Fails if any added AT is a TAUT or contains duplicates OR if any added RAT
+; produces pseudo-resolvants which are TAUT or contain duplicates
+(program is_lrat_proof_of_bottom ((f CMap) (proof LRATProof)) bool
+         (match proof
+                ((LRATProofd indices rest)
+                 (is_lrat_proof_of_bottom
+                   (CMap_remove_many indices f)
+                   rest))
+                ((LRATProofa idx c trace hints rest)
+                 (match (is_rat_trace f c trace hints)
+                    (UPR_Bottom
+                      (match
+                        c
+                        (cln tt)
+                        ((clc a b)
+                         (is_lrat_proof_of_bottom (CMap_insert idx c f) rest))))
+                    (UPR_Ok ff)
+                    (UPR_Broken ff)))
+                (LRATProofn ff))
+         )
+
+
+; Proof of a CMap from clause proofs.
+; The idx is unelidable b/c it is unspecified.
+;  Robust against clauses with duplicat literals, but not against tautological
+;  clauses.
+(declare CMap_holds (! c CMap type))
+(declare CMapn_proof (CMap_holds CMapn))
+(declare CMapc_proof
+         (! idx mpz ; Not elidable!
+            (! c clause
+               (! deduped_c clause
+                  (! rest CMap
+                     (! proof_c (holds c)
+                        (! proof_rest (CMap_holds rest)
+                            (! sc (^ (clause_dedup c) deduped_c)
+                               (CMap_holds (CMapc idx deduped_c rest))))))))))
+
+(define bottom (holds cln))
+(declare lrat_proof_of_bottom
+         (! cm CMap
+            (! proof_cm (CMap_holds cm)
+               (! proof LRATProof
+                  (! sc (^ (is_lrat_proof_of_bottom cm proof) tt)
+                     bottom)))))
+
+
+; TODO(aozdemir) Reducing the amount of checking that resides in side-conditions.
+; Steps
+;  1. Unroll the traversal of is_lrat_proof_of_bottom into a serialized
+;     sequence of axiom applications.
+;     The axioms would likely correspond to DELETE, IS T, IS AT, IS RAT.
+;     They would manipulate a CMap by way of side-conditions.
+;  2. Unroll AT checks by manifesting the assignment in data rather than marks,
+;     and having axioms like IS_UNSAT, IS_UNIT_ON_LITERAL.
+;  3. Unroll RAT checks in a similar fashion, although more painfully.
+; Depends on lrat.plf
+;
+; Implementation of DRAT checking.
+;
+; Unfortunately, there are **two** different notions of DRAT floating around in
+; the world:
+;   * Specified   DRAT : This is a reasonable proof format
+;   * Operational DRAT : This is a variant of specified DRAT warped by the
+;                        details of common SAT solver architectures.
+;
+; Both are detailed in this paper, along with their differences:
+;   http://fmv.jku.at/papers/RebolaPardoBiere-POS18.pdf
+;
+; This signature contains implementations for a checker for each.
+; **Specified DRAT** is first.
+
+; A DRAT proof itself: a list of addition or deletion instructions.
+(declare DRATProof type)
+(declare DRATProofn DRATProof)
+(declare DRATProofa (! c clause (! p DRATProof DRATProof)))
+(declare DRATProofd (! c clause (! p DRATProof DRATProof)))
+
+; ==================== ;
+; Functional  Programs ;
+; ==================== ;
+
+; Are two clauses equal (i.e., if interpretted as sets of literals, are those
+; sets equal?)
+;
+; Assumes that marks 1,2,3,4 are clear for the constituent variables, and
+; leaves them clear afterwards.
+;
+; Since clauses are sets, it is insufficient to do list equality.
+; We could sort them, but that would require defining an order on our variables,
+; and incurring the cost of sorting.
+;
+;
+; Instead, we do the following:
+;  1. Sweep the first clause, marking variables with flags 1,3 (pos) and 2,4 (neg)
+;  2. Sweep the second clause, erasing marks 1,2. Returning FALSE if no mark 3,4.
+;  3. Unsweep the first clause, returning FALSE on marks 1,2.
+;     Also unmarking 3,4, and 1,2 if needed
+;
+; So the mark 1 means (seen as + in c1, but not yet in c2)
+;    the mark 3 means (seen as + in c1)
+;    the mark 2 means (seen as - in c1, but not yet in c2)
+;    the mark 4 means (seen as - in c1)
+;
+; This implementation **does not**:
+;    1. assume that clauses do not have duplicates
+;       (so the clause [x v x v ~y] is an accceptable input)
+;    2. assume that clauses are non-tautological
+;       (so the clause [x v ~x] is an acceptable input)
+;
+; TODO(aozdemir) This implementation could be further optimized b/c once c1 is
+; drained, we need not continue to pattern match on it.
+(program clause_eq ((c1 clause) (c2 clause)) bool
+         (match
+           c1
+           (cln (match
+                  c2
+                  (cln tt)
+                  ((clc c2h c2t) (match
+                                   c2h
+                                   ((pos v)
+                                    (ifmarked1
+                                      v
+                                      (do (markvar1 v)
+                                        (clause_eq c1 c2t))
+                                      (ifmarked3
+                                        v
+                                        (clause_eq c1 c2t)
+                                        ff)))
+                                   ((neg v)
+                                    (ifmarked2
+                                      v
+                                      (do (markvar2 v)
+                                        (clause_eq c1 c2t))
+                                      (ifmarked4
+                                        v
+                                        (clause_eq c1 c2t)
+                                        ff)))))))
+           ((clc c1h c1t) (match
+                            c1h
+                            ((pos v)
+                             (ifmarked3
+                               v
+                               (clause_eq c1t c2)
+                               (do (markvar3 v)
+                                 (do (markvar1 v)
+                                   (let res (clause_eq c1t c2)
+                                     (do (markvar3 v)
+                                       (ifmarked1
+                                         v
+                                         (do (markvar1 v) ff)
+                                         res)))))))
+                            ((neg v)
+                             (ifmarked4
+                               v
+                               (clause_eq c1t c2)
+                               (do (markvar4 v)
+                                 (do (markvar2 v)
+                                   (let res (clause_eq c1t c2)
+                                     (do (markvar4 v)
+                                       (ifmarked2
+                                         v
+                                         (do (markvar2 v) ff)
+                                         res)))))))))))
+
+
+; Does this formula contain bottom as one of its clauses?
+(program cnf_has_bottom ((cs cnf)) bool
+         (match cs
+                (cnfn ff)
+                ((cnfc c rest) (match c
+                                      (cln tt)
+                                      ((clc l c') (cnf_has_bottom rest))))))
+
+; Return a new cnf with one copy of this clause removed.
+; If the clause is absent, returns the original cnf.
+(program cnf_remove_clause ((c clause) (cs cnf)) cnf
+         (match cs
+                (cnfn cnfn)
+                ((cnfc c' cs')
+                 (match (clause_eq c c')
+                        (tt cs')
+                        (ff (cnfc c' (cnf_remove_clause c cs')))))))
+
+; return (c1 union (c2 \ ~l))
+; Significant for how a RAT is defined.
+(program clause_pseudo_resolvent ((c1 clause) (c2 clause)) clause
+         (clause_dedup (clause_append c1
+                                      (clause_remove_all
+                                        (lit_flip (clause_head c1)) c2))))
+
+; Given a formula, `cs` and a clause `c`, return all pseudo resolvents, i.e. all
+;     (c union (c' \ ~head(c)))
+;   for c' in cs, where c' contains ~head(c)
+(program collect_pseudo_resolvents ((cs cnf) (c clause)) cnf
+         (match cs
+                (cnfn cnfn)
+                ((cnfc c' cs')
+                 (let rest_of_resolvents (collect_pseudo_resolvents cs' c)
+                   (match (clause_contains_lit c' (lit_flip (clause_head c)))
+                          (tt (cnfc (clause_pseudo_resolvent
+                                      c
+                                      c')
+                                    rest_of_resolvents))
+                          (ff rest_of_resolvents))))))
+
+; =============================================================== ;
+; Unit Propegation implementation (manipulates global assignment) ;
+; =============================================================== ;
+; See the lrat file for a description of the global assignment.
+
+; The result of search for a unit clause in
+(declare UnitSearchResult type)
+; There was a unit, and
+;    this is the (previously floating) literal that is now satisfied.
+;    this is a version of the input cnf with satisfied clauses removed.
+(declare USRUnit (! l lit (! f cnf UnitSearchResult)))
+; There was an unsat clause
+(declare USRBottom UnitSearchResult)
+; There was no unit.
+(declare USRNoUnit UnitSearchResult)
+
+; If a UnitSearchResult is a Unit, containing a cnf, adds this clause to that
+; cnf. Otherwise, returns the UnitSearchResult unmodified.
+(program USR_add_clause ((c clause) (usr UnitSearchResult)) UnitSearchResult
+         (match usr
+                ((USRUnit l f) (USRUnit l (cnfc c f)))
+                (USRBottom USRBottom)
+                (USRNoUnit USRNoUnit)))
+
+; Searches through the clauses, looking for a unit clause.
+; Reads the global assignment. Possibly assigns one variable.
+;  Returns
+;    USRBottom     if there is an unsat clause
+;    (USRUnit l f) if there is a unit, with lit l, and
+;                  f is the cnf with some SAT clauses removed.
+;    USRNoUnit     if there is no unit
+(program unit_search ((f cnf)) UnitSearchResult
+         (match f
+                (cnfn USRNoUnit)
+                ((cnfc c f')
+                 (match (clause_check_unit_and_maybe_mark c)
+                        (MRSat (unit_search f'))
+                        ((MRUnit l) (USRUnit l f'))
+                        (MRUnsat USRBottom)
+                        (MRNotUnit (USR_add_clause c (unit_search f')))))))
+
+
+; Given the current global assignment, does the formula `f` imply bottom via
+; unit propegation? Leaves the global assignment in the same state that it was
+; initially.
+(program unit_propegates_to_bottom ((f cnf)) bool
+         (match (unit_search f)
+                (USRBottom tt)
+                ((USRUnit l f') (let result (unit_propegates_to_bottom f')
+                               (do (lit_un_mk_sat l)
+                                 result)))
+                (USRNoUnit ff)))
+
+; ================================== ;
+; High-Level DRAT checking functions ;
+; ================================== ;
+
+; Is this clause an AT?
+(program is_at ((cs cnf) (c clause)) bool
+         (match (is_t c)
+                (tt tt)
+                (ff (do (clause_mk_all_unsat c)
+                      (let r (unit_propegates_to_bottom cs)
+                        (do (clause_un_mk_all_unsat c)
+                          r))))))
+
+; Are all of these clauses ATs?
+(program are_all_at ((cs cnf) (clauses cnf)) bool
+         (match clauses
+                (cnfn tt)
+                ((cnfc c clauses')
+                 (match (is_at cs c)
+                        (tt (are_all_at cs clauses'))
+                        (ff ff)))))
+
+; Is the clause `c` a RAT for the formula `cs`?
+(program is_rat ((cs cnf) (c clause)) bool
+         (match (is_t c)
+                (tt tt)
+                (ff (match (is_at cs c)
+                           (tt tt)
+                           (ff (match c
+                                      (cln ff)
+                                      ((clc a b) (are_all_at ; dedent
+                                 cs
+                                 (collect_pseudo_resolvents cs c)))))))))
+
+; Is this proof a valid DRAT proof of bottom?
+(program is_specified_drat_proof ((f cnf) (proof DRATProof)) bool
+         (match proof
+                (DRATProofn (cnf_has_bottom f))
+                ((DRATProofa c p) (match
+                                    (is_rat f c)
+                                    (tt (is_specified_drat_proof (cnfc c f) p))
+                                    (ff ff)))
+                ((DRATProofd c p)
+                 (is_specified_drat_proof (cnf_remove_clause c f) p))))
+
+
+; =============================== ;
+; Operational DRAT implementation ;
+; =============================== ;
+
+; Operation DRAT is defined in the paper "Two Flavors of DRAT".
+; Below is an extension of the DRAT signature to handle it.
+
+; Notes on types.
+; For operational DRAT it is useful to manifest partial assignments in values
+; (although we still use the global assignment in some places). To this end,
+; literals are used to represent single-variable assignments ((pos v) denotes
+; {v maps to true}) and clauses are partial assignments by way of being
+; literal lists.
+
+; Copy the partial assignment represented by a clause into the global
+; assignment. Fails if that clause represents an inconsistent partial
+; assignment (e.g. v is both true and false)
+(program clause_into_global ((a clause)) Unit
+         (match a
+                (cln unit)
+                ((clc l rest)
+                 (do (lit_mk_sat l) (clause_into_global rest)))))
+
+; Remove the partial assignment represented by c from the global assignment
+(program clause_undo_into_global ((a clause)) Unit
+         (match a
+                (cln unit)
+                ((clc l rest)
+                 (do (lit_un_mk_sat l) (clause_undo_into_global rest)))))
+
+; Does this clause have no floating literals w.r.t. the global assignment?
+(program clause_no_floating ((c clause)) bool
+         (match c
+                (cln tt)
+                ((clc l rest) (match (lit_is_floating l)
+                                    (tt ff)
+                                    (ff (clause_no_floating rest))))))
+
+; Does this clause have no sat literals w.r.t. the global assignment?
+(program clause_no_sat ((c clause)) bool
+         (match c
+                (cln tt)
+                ((clc l rest) (match (lit_is_sat l)
+                                    (tt ff)
+                                    (ff (clause_no_sat rest))))))
+
+; Does this clause have one sat literal w.r.t. the global assignment?
+(program clause_one_sat ((c clause)) bool
+         (match c
+                (cln ff)
+                ((clc l rest) (match (lit_is_sat l)
+                                    (tt (clause_no_sat rest))
+                                    (ff (clause_one_sat rest))))))
+
+; Is this clause a unit clause w.r.t. the global assignment?
+; This notion is defined as:
+;    * A clause where no literals are floating, and exactly one is sat.
+(program clause_is_unit_wrt_up_model ((c clause) (up_model clause)) bool
+         (let c' (clause_dedup c)
+         (do (clause_into_global up_model)
+           (let result (match (clause_no_floating c')
+                              (tt (clause_one_sat c'))
+                              (ff ff))
+             (do (clause_undo_into_global up_model)
+               result)))))
+
+; Result from constructing a UP model (defined in "Two Flavors of DRAT")
+; Technically, we're constructing the shared UP model -- the intersection of all
+; UP models.
+; Informally, this is just the partial assignment implied by UP.
+;
+; This type is necessary, because constructing a UP model can reveal an
+; inconsistent UP model -- one which assigns some variable to true and false.
+; This would break our machinery, so we special case it.
+(declare UPConstructionResult type)
+; An actual model
+(declare UPCRModel (! up_model clause UPConstructionResult))
+; Bottom is implied!
+(declare UPCRBottom UPConstructionResult)
+
+
+; Do unit propagation on `f`, constructing a UP model for it.
+(program build_up_model ((f cnf)) UPConstructionResult
+         (match (unit_search f)
+                (USRBottom UPCRBottom)
+                (USRNoUnit (UPCRModel cln))
+                ((USRUnit l f')
+                 (let result (build_up_model f')
+                   (do (lit_un_mk_sat l)
+                     (match result
+                            (UPCRBottom UPCRBottom)
+                            ((UPCRModel model) (UPCRModel (clc l model)))))))))
+
+; Given some starting assignment (`up_model`), continue UP to construct a larger
+; model.
+(program extend_up_model ((f cnf) (up_model clause)) UPConstructionResult
+         (do (clause_into_global up_model)
+           (let result (build_up_model f)
+             (do (clause_undo_into_global up_model)
+               (match result
+                      (UPCRBottom UPCRBottom)
+                      ((UPCRModel up_model')
+                       (UPCRModel (clause_append up_model up_model'))))))))
+
+; Helper for `is_operational_drat_proof` which takes a UP model for the working
+; formula. The UP model is important for determining which clause deletions
+; actually are executed in operational DRAT. Passing the UP model along
+; prevents it from being fully recomputed everytime.
+(program is_operational_drat_proof_h ((f cnf) (up_model clause) (pf DRATProof)) bool
+         (match pf
+                (DRATProofn (cnf_has_bottom f))
+                ((DRATProofd c pf')
+                 (match (clause_is_unit_wrt_up_model c up_model)
+                        (tt (is_operational_drat_proof_h f up_model pf'))
+                        (ff (is_operational_drat_proof_h
+                              (cnf_remove_clause c f) up_model pf'))))
+                ((DRATProofa c pf')
+                 (let f' (cnfc c f)
+                   (match (is_rat f c)
+                          (tt (match (extend_up_model f' up_model)
+                                     (UPCRBottom tt)
+                                     ((UPCRModel up_model')
+                                      (is_operational_drat_proof_h f' up_model' pf'))))
+                          (ff ff))))))
+
+; Is this an operational DRAT proof of bottom for this formula?
+(program is_operational_drat_proof ((f cnf) (pf DRATProof)) bool
+         (match (build_up_model f)
+                (UPCRBottom tt)
+                ((UPCRModel model) (is_operational_drat_proof_h f model pf))))
+
+; Is this a specified or operational DRAT proof of bottom for this formula?
+(program is_drat_proof ((f cnf) (pf DRATProof)) bool
+         (match (is_specified_drat_proof f pf)
+                (tt tt)
+                (ff (is_operational_drat_proof f pf))))
+
+(declare drat_proof_of_bottom
+         (! f cnf
+            (! proof_of_formula (cnf_holds f)
+               (! proof DRATProof
+                  (! sc (^ (is_drat_proof f proof) tt)
+                     bottom)))))
+
+; Depends on sat.plf
+
+; This file exists to support the **definition introduction** (or **extension**)
+; rule in the paper:
+;  "Extended Resolution Simulates DRAT"
+; which can be found at http://www.cs.utexas.edu/~marijn/publications/ijcar18.pdf
+;
+; The core idea of extended resolution is that given **any** formula f
+; involving the variables from some SAT problem, one can introduce the
+; constraint
+;
+;    new <=> f
+;
+; without changing satisfiability, where "new" is a fresh variable.
+;
+; This signature does not provide axioms for facilitating full use of this
+; idea. Instead, this signature facilitates use of one specific kind of
+; extension, that of the form:
+;
+;     new <=> old v (~l_1 ^ ~l_2 ^ ... ^ ~l_n)
+;
+; which translates into the clauses:
+;
+;                      new v l_1 v l_2 v ... v l_n
+;                      new v ~old
+;     for each i <= n: l_i v ~new v old
+;
+; This kind of extension is (a) sufficient to simulate DRAT proofs and (b) easy
+; to convert to clauses, which is why we use it.
+
+; A definition witness value for:
+;              new <=> old v (~others_1 ^ ~others_2 ^ ... ^ ~others_n)
+; It witnesses the fact that new was fresh when it was defined by the above.
+;
+; Thus it witnesses that the above, when added to the formula consisting of the
+; conjunction all the already-proven clauses, produces an equisatisfiable
+; formula.
+(declare definition (! new var (! old lit (! others clause type))))
+
+; Given `old` and `others`, this takes a continuation which expects
+;      1. a fresh variable `new`
+;      2. a definition witness value for:
+;              new <=> old v (~others_1 ^ ~others_2 ^ ... ^ ~others_n)
+;
+; Aside:
+;    In programming a **continuation** of some computation is a function that
+;    takes the results of that computation as arguments to produce a final
+;    result.
+;
+;    In proof-construction a **continuation** of some reasoning is a function
+;    that takes the results of that reasoning as arguments to proof a final
+;    result.
+;
+; That definition witness value can be clausified using the rule below.
+;
+; There need to be two different rules because the side-condition for
+; clausification needs access to the new variable, which doesn't exist except
+; inside the continuation, which is out-of-scope for any side-condition
+; associated with this rule.
+(declare decl_definition
+         (! old lit
+            (! others clause ; List of vars
+               (! pf_continuation (! new var (! def (definition new old others)
+                                           (holds cln)))
+                  (holds cln)))))
+
+; Represents multiple conjoined clauses.
+; There is a list, `heads` of literals, each of which is suffixed by the
+; same `tail`.
+(declare common_tail_cnf_t type)
+(declare common_tail_cnf
+         (! heads clause
+         (! tail  clause common_tail_cnf_t)))
+
+; A member of this type is a proof of a common_tail_cnf.
+(declare common_tail_cnf_holds
+         (! cnf common_tail_cnf_t type))
+
+; This translates a definition witness value for the def:
+;
+;    new <=> old v (~l_1 ^ ~l_2 ^ ... ^ ~l_n)
+;
+; into the clauses:
+;
+;                      new v l_1 v l_2 v ... v l_n
+;                      new v ~old
+;     for each i <= n: l_i v ~new v old              (encoded as (cnf_holds ...))
+(declare clausify_definition
+         (! new var
+         (! old lit
+         (! others clause
+         ; Given a definition { new <-> old v (~l_1 ^ ~l_2 ^ ... ^ ~l_n) }
+         (! def (definition new old others)
+         (! negOld lit
+         (! mkNegOld (^ (lit_flip old) negOld)
+         ; If you can prove bottom from its clausal representation
+         (! pf_continuation
+            ; new v l_1 v l_2 v ... v l_n
+            (! pf_c1 (holds (clc (pos new) others))
+               ; new v ~old
+               (! pf_c2 (holds (clc (pos new) (clc negOld cln)))
+                  ; for each i <= n: l_i v ~new v old
+                  (! pf_cs (common_tail_cnf_holds
+                             (common_tail_cnf
+                               others
+                               (clc (neg new) (clc old cln))))
+                     (holds cln))))
+         ; Then you've proven bottom
+         (holds cln)))))))))
+
+; These axioms are useful for converting a proof of some CNF formula represented
+; using the `common_tail_cnf` type (a value of type `common_tail_cnf_holds`),
+; into proofs of its constituent clauses (many values of type `holds`).
+; Given
+;    1. a proof of some `common_tail_cnf`
+; Then
+;    1. the first axiom gives you a proof of the first `clause` therein and
+;    2. the second gives you a proof of the rest of the `common_tail_cnf`.
+(declare common_tail_cnf_prove_head
+         (! first lit
+         (! rest clause
+         (! tail clause
+         (! pf (common_tail_cnf_holds (common_tail_cnf (clc first rest) tail))
+            (holds (clc first tail)))))))
+(declare common_tail_cnf_prove_tail
+         (! first lit
+         (! rest clause
+         (! tail clause
+         (! pf (common_tail_cnf_holds (common_tail_cnf (clc first rest) tail))
+            (common_tail_cnf_holds (common_tail_cnf rest tail)))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Theory of Equality and Congruence Closure
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; depends on : smt.plf
+
+; sorts :
+
+(declare arrow (! s1 sort (! s2 sort sort)))	; function constructor
+
+; functions :
+
+(declare apply (! s1 sort
+               (! s2 sort
+               (! t1 (term (arrow s1 s2))
+               (! t2 (term s1)
+                (term s2))))))
+
+
+; inference rules :
+
+(declare trust (th_holds false))	; temporary
+(declare trust_f (! f formula (th_holds f)))  ; temporary
+
+(declare refl
+  (! s sort
+  (! t (term s)
+    (th_holds (= s t t)))))
+
+(declare symm (! s sort
+              (! x (term s)
+              (! y (term s)
+              (! u (th_holds (= s x y))
+                (th_holds (= s y x)))))))
+
+(declare trans (! s sort
+               (! x (term s)
+               (! y (term s)
+               (! z (term s)
+               (! u (th_holds (= s x y))
+               (! u (th_holds (= s y z))
+                 (th_holds (= s x z)))))))))
+
+(declare negsymm (! s sort
+              	 (! x (term s)
+              	 (! y (term s)
+              	 (! u (th_holds (not (= s x y)))
+                   (th_holds (not (= s y x))))))))
+
+(declare negtrans1 (! s sort
+                   (! x (term s)
+              	   (! y (term s)
+               	   (! z (term s)
+               	   (! u (th_holds (not (= s x y)))
+               	   (! u (th_holds (= s y z))
+                     (th_holds (not (= s x z))))))))))
+
+(declare negtrans2 (! s sort
+                   (! x (term s)
+              	   (! y (term s)
+               	   (! z (term s)
+               	   (! u (th_holds (= s x y))
+               	   (! u (th_holds (not (= s y z)))
+                     (th_holds (not (= s x z))))))))))
+
+(declare cong (! s1 sort
+              (! s2 sort
+              (! a1 (term (arrow s1 s2))
+              (! b1 (term (arrow s1 s2))
+              (! a2 (term s1)
+              (! b2 (term s1)
+              (! u1 (th_holds (= (arrow s1 s2) a1 b1))
+              (! u2 (th_holds (= s1 a2 b2))
+                (th_holds (= s2 (apply s1 s2 a1 a2) (apply s1 s2 b1 b2))))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; Examples
+
+; an example of "(p1 or p2(0)) and t1=t2(1)"
+;(! p1 (term Bool)
+;(! p2 (term (arrow Int Bool))
+;(! t1 (term Int)
+;(! t2 (term (arrow Int Int))
+;(! F (th_holds (and (or (p_app p1) (p_app (apply _ _ p2 0)))
+;                    (= _ t1 (apply _ _ t2 1))))
+;  ...
+
+; another example of "p3(a,b)"
+;(! a (term Int)
+;(! b (term Int)
+;(! p3 (term (arrow Int (arrow Int Bool)))	; arrow is right assoc.
+;(! F (th_holds (p_app (apply _ _ (apply _ _ p3 a) b))) ; apply is left assoc.
+;  ...
+;;;; TEMPORARY:
+
+(declare trust-bad (th_holds false))
+
+; helper stuff
+
+(program mpz_ ((x mpz) (y mpz)) formula
+    (mp_ifzero (mpz_sub x y) true false))
+
+
+; "bitvec" is a term of type "sort"
+; (declare BitVec sort)
+(declare BitVec (!n mpz sort))
+
+; bit type
+(declare bit type)
+(declare b0 bit)
+(declare b1 bit)
+
+; bit vector type used for constants
+(declare bv type)
+(declare bvn bv)
+(declare bvc (! b bit (! v bv bv)))
+
+; calculate the length of a bitvector
+;; (program bv_len ((v bv)) mpz
+;;   (match v
+;;     (bvn 0)
+;;     ((bvc b v') (mp_add (bv_len v') 1))))
+
+
+; a bv constant term
+(declare a_bv
+	 (! n mpz
+	 (! v bv
+	    (term (BitVec n)))))
+
+(program bv_constants_are_disequal ((x bv) (y bv)) formula
+  (match x
+      (bvn (fail formula))
+      ((bvc bx x')
+        (match y
+          (bvn (fail formula))
+          ((bvc by y') (match bx
+                             (b0 (match by (b0 (bv_constants_are_disequal x' y')) (b1 (true))))
+                             (b1 (match by (b0 (true)) (b1 (bv_constants_are_disequal x' y'))))
+          ))
+      ))
+))
+
+(declare bv_disequal_constants
+	 (! n mpz
+	 (! x bv
+	 (! y bv
+	 (! c (^ (bv_constants_are_disequal x y) true)
+  	   (th_holds (not (= (BitVec n) (a_bv n x) (a_bv n y)))))))))
+
+; a bv variable
+(declare var_bv type)
+; a bv variable term
+(declare a_var_bv
+	 (! n mpz
+	 (! v var_bv
+	    (term (BitVec n)))))
+
+; bit vector binary operators
+(define bvop2
+	(! n mpz
+	(! x (term (BitVec n))
+        (! y (term (BitVec n))
+             	   (term (BitVec n))))))
+
+(declare bvand bvop2)
+(declare bvor bvop2)
+(declare bvor bvop2)
+(declare bvxor bvop2)
+(declare bvnand bvop2)
+(declare bvnor bvop2)
+(declare bvxnor bvop2)
+(declare bvmul bvop2)
+(declare bvadd bvop2)
+(declare bvsub bvop2)
+(declare bvudiv bvop2)
+(declare bvurem bvop2)
+(declare bvsdiv bvop2)
+(declare bvsrem bvop2)
+(declare bvsmod bvop2)
+(declare bvshl bvop2)
+(declare bvlshr bvop2)
+(declare bvashr bvop2)
+(declare concat bvop2)
+
+; bit vector unary operators
+(define bvop1
+	(! n mpz
+	(! x (term (BitVec n))
+             	   (term (BitVec n)))))
+
+
+(declare bvneg bvop1)
+(declare bvnot bvop1)
+(declare rotate_left  bvop1)
+(declare rotate_right bvop1)
+
+(declare bvcomp
+	 (! n mpz
+ 	 (! t1 (term (BitVec n))
+	 (! t2 (term (BitVec n))
+	    (term (BitVec 1))))))
+
+
+(declare concat
+	 (! n mpz
+	 (! m mpz
+	 (! m' mpz
+	 (! t1 (term (BitVec m))
+	 (! t2 (term (BitVec m'))
+	    (term (BitVec n))))))))
+
+;; side-condition fails in signature only??
+;;	 (! s (^ (mp_add m m') n)
+
+;; (declare repeat bvopp)
+
+(declare extract
+	 (! n mpz
+	 (! i mpz
+	 (! j mpz
+	 (! m mpz
+	 (! t2 (term (BitVec m))
+	    (term (BitVec n))))))))
+
+(declare zero_extend
+	 (! n mpz
+	 (! i mpz
+	 (! m mpz
+	 (! t2 (term (BitVec m))
+	    (term (BitVec n)))))))
+
+(declare sign_extend
+	 (! n mpz
+	 (! i mpz
+	 (! m mpz
+	 (! t2 (term (BitVec m))
+	    (term (BitVec n)))))))
+
+(declare repeat
+	 (! n mpz
+	 (! i mpz
+	 (! m mpz
+	 (! t2 (term (BitVec m))
+	    (term (BitVec n)))))))
+
+
+
+;; TODO: add checks for valid typing for these operators
+;; (! c1 (^ (mpz_lte i j)
+;; (! c2 (^ (mpz_lt i n) true)
+;; (! c3 (^ (mp_ifneg i false true) true)
+;; (! c4 (^ (mp_ifneg j false true) true)
+;; (! s (^ (mp_add (mpz_sub i j) 1) m)
+
+
+; bit vector predicates
+(define bvpred
+	(! n mpz
+	(! x (term (BitVec n))
+	(! y (term (BitVec n))
+	           formula))))
+
+(declare bvult bvpred)
+(declare bvule bvpred)
+(declare bvugt bvpred)
+(declare bvuge bvpred)
+(declare bvslt bvpred)
+(declare bvsle bvpred)
+(declare bvsgt bvpred)
+(declare bvsge bvpred)
+; bit blasted terms as list of formulas
+(declare bblt type)
+(declare bbltn bblt)
+(declare bbltc (! f formula (! v bblt bblt)))
+
+; calculate the length of a bit-blasted term
+(program bblt_len ((v bblt)) mpz
+  (match v
+    (bbltn 0)
+    ((bbltc b v') (mp_add (bblt_len v') 1))))
+
+
+; (bblast_term x y) means term y corresponds to bit level interpretation x
+(declare bblast_term
+	 (! n mpz
+	 (! x (term (BitVec n))
+	 (! y bblt
+	    type))))
+
+; FIXME: for unsupported bit-blast terms
+(declare trust_bblast_term
+	 (! n mpz
+	 (! x (term (BitVec n))
+	 (! y bblt
+	    (bblast_term n x y)))))
+
+
+; Binds a symbol to the bblast_term to be used later on.
+(declare decl_bblast
+	 (! n mpz
+	 (! b bblt
+	 (! t (term (BitVec n))
+	 (! bb (bblast_term n t b)
+	 (! s (^ (bblt_len b) n)
+	 (! u (! v (bblast_term n t b) (holds cln))
+		   (holds cln))))))))
+
+(declare decl_bblast_with_alias
+	 (! n mpz
+	 (! b bblt
+	 (! t (term (BitVec n))
+	 (! a (term (BitVec n))
+	 (! bb (bblast_term n t b)
+	 (! e (th_holds (= (BitVec n) t a))
+	 (! s (^ (bblt_len b) n)
+	 (! u (! v (bblast_term n a b) (holds cln))
+		   (holds cln))))))))))
+
+; a predicate to represent the n^th bit of a bitvector term
+(declare bitof
+	 (! x var_bv
+	 (! n mpz formula)))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;           BITBLASTING RULES
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST CONSTANT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_const ((v bv) (n mpz)) bblt
+  (mp_ifneg n (match v (bvn bbltn)
+                       (default (fail bblt)))
+              (match v ((bvc b v') (bbltc (match b (b0 false) (b1 true)) (bblast_const v' (mp_add n (~ 1)))))
+                       (default (fail bblt)))))
+
+(declare bv_bbl_const (! n mpz
+                      (! f bblt
+                      (! v bv
+                      (! c (^ (bblast_const v (mp_add n (~ 1))) f)
+                           (bblast_term n (a_bv n v) f))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST VARIABLE
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_var ((x var_bv) (n mpz)) bblt
+  (mp_ifneg n bbltn
+              (bbltc (bitof x n) (bblast_var x (mp_add n (~ 1))))))
+
+(declare bv_bbl_var (! n mpz
+                    (! x var_bv
+                    (! f bblt
+                    (! c (^ (bblast_var x (mp_add n (~ 1))) f)
+                         (bblast_term n (a_var_bv n x) f))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST CONCAT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_concat ((x bblt) (y bblt)) bblt
+  (match x
+    (bbltn (match y ((bbltc by y') (bbltc by (bblast_concat x y')))
+    	   	    (bbltn bbltn)))
+    ((bbltc bx x') (bbltc bx (bblast_concat x' y)))))
+
+(declare bv_bbl_concat (! n mpz
+	 	       (! m mpz
+		       (! m1 mpz
+                       (! x (term (BitVec m))
+		       (! y (term (BitVec m1))
+		       (! xb bblt
+		       (! yb bblt
+		       (! rb bblt
+		       (! xbb (bblast_term m x xb)
+		       (! ybb (bblast_term m1 y yb)
+                       (! c (^ (bblast_concat xb yb ) rb)
+                           (bblast_term n (concat n m m1 x y) rb)))))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST EXTRACT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_extract_rec ((x bblt) (i mpz) (j mpz) (n mpz)) bblt
+  (match x
+    ((bbltc bx x') (mp_ifneg (mpz_sub (mpz_sub j n) 1)
+    	       	   	     (mp_ifneg (mpz_sub (mpz_sub n i) 1)
+			    	  	  (bbltc bx (bblast_extract_rec x' i j (mpz_sub n 1)))
+					  (bblast_extract_rec x' i j (mpz_sub n 1)))
+
+			     bbltn))
+   (bbltn bbltn)))
+
+(program bblast_extract ((x bblt) (i mpz) (j mpz) (n mpz)) bblt
+ (bblast_extract_rec x i j (mpz_sub n 1)))
+
+(declare bv_bbl_extract (! n mpz
+			(! i mpz
+			(! j mpz
+			(! m mpz
+                       	(! x (term (BitVec m))
+		       	(! xb bblt
+		       	(! rb bblt
+		       	(! xbb (bblast_term m x xb)
+			(! c ( ^ (bblast_extract xb i j m) rb)
+                           (bblast_term n (extract n i j m x) rb)))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST ZERO/SIGN EXTEND
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program extend_rec ((x bblt) (i mpz) (b formula)) bblt
+  (mp_ifneg i x
+  	    (bbltc b (extend_rec x (mpz_sub i 1) b))))
+
+(program bblast_zextend ((x bblt) (i mpz)) bblt
+ (extend_rec x (mpz_sub i 1) false))
+
+(declare bv_bbl_zero_extend (! n mpz
+			(! k mpz
+			(! m mpz
+                       	(! x (term (BitVec m))
+		       	(! xb bblt
+		       	(! rb bblt
+		       	(! xbb (bblast_term m x xb)
+			(! c ( ^ (bblast_zextend xb k) rb)
+                           (bblast_term n (zero_extend n k m x) rb))))))))))
+
+(program bblast_sextend ((x bblt) (i mpz)) bblt
+ (match x (bbltn (fail bblt))
+ 	  ((bbltc xb x') (extend_rec x (mpz_sub i 1) xb))))
+
+(declare bv_bbl_sign_extend (! n mpz
+			(! k mpz
+			(! m mpz
+                       	(! x (term (BitVec m))
+		       	(! xb bblt
+		       	(! rb bblt
+		       	(! xbb (bblast_term m x xb)
+			(! c ( ^ (bblast_sextend xb k) rb)
+                           (bblast_term n (sign_extend n k m x) rb))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVAND
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvand ((x bblt) (y bblt)) bblt
+  (match x
+    (bbltn (match y (bbltn bbltn) (default (fail bblt))))
+    ((bbltc bx x') (match y
+                      (bbltn (fail bblt))
+                      ((bbltc by y') (bbltc (and bx by) (bblast_bvand x' y')))))))
+
+(declare bv_bbl_bvand (! n mpz
+                      (! x (term (BitVec n))
+		      (! y (term (BitVec n))
+		      (! xb bblt
+		      (! yb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+		      (! ybb (bblast_term n y yb)
+                      (! c (^ (bblast_bvand xb yb ) rb)
+                           (bblast_term n (bvand n x y) rb)))))))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVNOT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvnot ((x bblt)) bblt
+  (match x
+    (bbltn bbltn)
+    ((bbltc bx x') (bbltc (not bx) (bblast_bvnot x')))))
+
+(declare bv_bbl_bvnot (! n mpz
+                      (! x (term (BitVec n))
+		      (! xb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+                      (! c (^ (bblast_bvnot xb ) rb)
+                           (bblast_term n (bvnot n x) rb))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVOR
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvor ((x bblt) (y bblt)) bblt
+  (match x
+    (bbltn (match y (bbltn bbltn) (default (fail bblt))))
+    ((bbltc bx x') (match y
+                      (bbltn (fail bblt))
+                      ((bbltc by y') (bbltc (or bx by) (bblast_bvor x' y')))))))
+
+(declare bv_bbl_bvor (! n mpz
+                      (! x (term (BitVec n))
+		      (! y (term (BitVec n))
+		      (! xb bblt
+		      (! yb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+		      (! ybb (bblast_term n y yb)
+                      (! c (^ (bblast_bvor xb yb ) rb)
+                           (bblast_term n (bvor n x y) rb)))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVXOR
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvxor ((x bblt) (y bblt)) bblt
+  (match x
+    (bbltn (match y (bbltn bbltn) (default (fail bblt))))
+    ((bbltc bx x') (match y
+                      (bbltn (fail bblt))
+                      ((bbltc by y') (bbltc (xor bx by) (bblast_bvxor x' y')))))))
+
+(declare bv_bbl_bvxor (! n mpz
+                      (! x (term (BitVec n))
+		      (! y (term (BitVec n))
+		      (! xb bblt
+		      (! yb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+		      (! ybb (bblast_term n y yb)
+                      (! c (^ (bblast_bvxor xb yb ) rb)
+                           (bblast_term n (bvxor n x y) rb)))))))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVADD
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;; return the carry bit after adding x y
+;; FIXME: not the most efficient thing in the world
+(program bblast_bvadd_carry ((a bblt) (b bblt) (carry formula)) formula
+(match a
+  ( bbltn (match b (bbltn carry) (default (fail formula))))
+  ((bbltc ai a') (match b
+  	     	   (bbltn (fail formula))
+	 	   ((bbltc bi b') (or (and ai bi) (and (xor ai bi) (bblast_bvadd_carry a' b' carry))))))))
+
+;; ripple carry adder where carry is the initial carry bit
+(program bblast_bvadd ((a bblt) (b bblt) (carry formula)) bblt
+(match a
+  ( bbltn (match b (bbltn bbltn) (default (fail bblt))))
+  ((bbltc ai a') (match b
+  	     	   (bbltn (fail bblt))
+	 	   ((bbltc bi b') (bbltc (xor (xor ai bi) (bblast_bvadd_carry a' b' carry))
+				  	 (bblast_bvadd a' b' carry)))))))
+
+
+(program reverse_help ((x bblt) (acc bblt)) bblt
+(match x
+       (bbltn acc)
+       ((bbltc xi x') (reverse_help x' (bbltc xi acc)))))
+
+
+(program reverseb ((x bblt)) bblt
+	 (reverse_help x bbltn))
+
+
+; AJR: use this version?
+;(program bblast_bvadd_2h ((a bblt) (b bblt) (carry formula)) bblt
+;(match a
+;  ( bbltn (match b (bbltn bbltn) (default (fail bblt))))
+;  ((bbltc ai a') (match b
+;       (bbltn (fail bblt))
+;	 	   ((bbltc bi b')
+;	 	     (let carry' (or (and ai bi) (and (xor ai bi) carry))
+;	 	     (bbltc (xor (xor ai bi) carry)
+;				  	    (bblast_bvadd_2h a' b' carry'))))))))
+
+;(program bblast_bvadd_2 ((a bblt) (b bblt) (carry formula)) bblt
+;(let ar (reverseb a) ;; reverse a and b so that we can build the circuit
+;(let br (reverseb b) ;; from the least significant bit up
+;(let ret (bblast_bvadd_2h ar br carry)
+;  (reverseb ret)))))
+
+(declare bv_bbl_bvadd (! n mpz
+                      (! x (term (BitVec n))
+		      (! y (term (BitVec n))
+		      (! xb bblt
+		      (! yb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+		      (! ybb (bblast_term n y yb)
+                      (! c (^ (bblast_bvadd xb yb false) rb)
+                           (bblast_term n (bvadd n x y) rb)))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVNEG
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_zero ((n mpz)) bblt
+(mp_ifzero n bbltn
+	     (bbltc false (bblast_zero (mp_add n (~1))))))
+
+(program bblast_bvneg ((x bblt) (n mpz)) bblt
+  (bblast_bvadd (bblast_bvnot x) (bblast_zero n) true))
+
+
+(declare bv_bbl_bvneg (! n mpz
+                      (! x (term (BitVec n))
+		      (! xb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+                      (! c (^ (bblast_bvneg xb n) rb)
+                           (bblast_term n (bvneg n x) rb))))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVMUL
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+;; shift add multiplier
+
+;; (program concat ((a bblt) (b bblt)) bblt
+;;   (match a (bbltn b)
+;;   	   ((bbltc ai a') (bbltc ai (concat a' b)))))
+
+
+(program top_k_bits ((a bblt) (k mpz)) bblt
+  (mp_ifzero k bbltn
+  	     (match a (bbltn (fail bblt))
+	     	      ((bbltc ai a') (bbltc ai (top_k_bits a' (mpz_sub k 1)))))))
+
+(program bottom_k_bits ((a bblt) (k mpz)) bblt
+ (reverseb (top_k_bits (reverseb a) k)))
+
+;; assumes the least signigicant bit is at the beginning of the list
+(program k_bit ((a bblt) (k mpz)) formula
+(mp_ifneg k (fail formula)
+(match a (bbltn (fail formula))
+         ((bbltc ai a') (mp_ifzero k ai (k_bit a' (mpz_sub k 1)))))))
+
+(program and_with_bit ((a bblt) (bt formula)) bblt
+(match a (bbltn bbltn)
+         ((bbltc ai a') (bbltc (and bt ai) (and_with_bit a' bt)))))
+
+;; a is going to be the current result
+;; carry is going to be false initially
+;; b is the and of a and b[k]
+;; res is going to be bbltn initially
+(program mult_step_k_h ((a bblt) (b bblt) (res bblt) (carry formula) (k mpz)) bblt
+(match a
+  (bbltn (match b (bbltn res) (default (fail bblt))))
+  ((bbltc ai a')
+    (match b (bbltn (fail bblt))
+             ((bbltc bi b')
+	     (mp_ifneg (mpz_sub k 1)
+	     	         (let carry_out (or (and ai bi) (and (xor ai bi) carry))
+			 (let curr (xor (xor ai bi) carry)
+			    (mult_step_k_h a' b' (bbltc curr res) carry_out (mpz_sub k 1))))
+			 (mult_step_k_h a' b (bbltc ai res) carry (mpz_sub k 1))
+))))))
+
+;; assumes that a, b and res have already been reversed
+(program mult_step ((a bblt) (b bblt) (res bblt) (n mpz) (k mpz)) bblt
+(let k' (mpz_sub n k )
+(let ak (top_k_bits a k')
+(let b' (and_with_bit ak (k_bit b k))
+ (mp_ifzero (mpz_sub k' 1)
+   (mult_step_k_h res b' bbltn false k)
+   (let res' (mult_step_k_h res b' bbltn false k)
+   (mult_step a b (reverseb res') n (mp_add k 1))))))))
+
+
+(program bblast_bvmul ((a bblt) (b bblt) (n mpz)) bblt
+(let ar (reverseb a) ;; reverse a and b so that we can build the circuit
+(let br (reverseb b) ;; from the least significant bit up
+(let res (and_with_bit ar (k_bit br 0))
+     (mp_ifzero (mpz_sub n 1)     ;; if multiplying 1 bit numbers no need to call mult_step
+     		res
+		(mult_step ar br res n 1))))))
+
+(declare bv_bbl_bvmul (! n mpz
+                      (! x (term (BitVec n))
+		      (! y (term (BitVec n))
+		      (! xb bblt
+		      (! yb bblt
+		      (! rb bblt
+		      (! xbb (bblast_term n x xb)
+		      (! ybb (bblast_term n y yb)
+                      (! c (^ (bblast_bvmul xb yb n) rb)
+                           (bblast_term n (bvmul n x y) rb)))))))))))
+
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST EQUALS
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+; bit blast  x = y
+; for x,y of size n, it will return a conjunction (x.0 = y.0 ^ ( ... ^ (x.{n-1} = y.{n-1})))
+; f is the accumulator formula that builds the equality in the right order
+(program bblast_eq_rec ((x bblt) (y bblt) (f formula)) formula
+  (match x
+    (bbltn (match y (bbltn f) (default (fail formula))))
+    ((bbltc fx x') (match y
+                      (bbltn (fail formula))
+                      ((bbltc fy y') (bblast_eq_rec x' y' (and (iff fx fy) f)))))
+    (default (fail formula))))
+
+(program bblast_eq ((x bblt) (y bblt)) formula
+	 (match x
+	 	((bbltc bx x') (match y ((bbltc by y') (bblast_eq_rec x' y' (iff bx by)))
+			       	      	(default (fail formula))))
+		(default (fail formula))))
+
+
+;; TODO: a temporary bypass for rewrites that we don't support yet. As soon
+;; as we do, remove this rule.
+
+(declare bv_bbl_=_false
+	 (! n mpz
+	 (! x (term (BitVec n))
+         (! y (term (BitVec n))
+         (! bx bblt
+         (! by bblt
+         (! f formula
+         (! bbx (bblast_term n x bx)
+         (! bby (bblast_term n y by)
+         (! c (^ (bblast_eq bx by) f)
+            (th_holds (iff (= (BitVec n) x y) false))))))))))))
+
+(declare bv_bbl_=
+	 (! n mpz
+	 (! x (term (BitVec n))
+         (! y (term (BitVec n))
+         (! bx bblt
+         (! by bblt
+         (! f formula
+         (! bbx (bblast_term n x bx)
+         (! bby (bblast_term n y by)
+         (! c (^ (bblast_eq bx by) f)
+            (th_holds (iff (= (BitVec n) x y) f))))))))))))
+
+(declare bv_bbl_=_swap
+	 (! n mpz
+	 (! x (term (BitVec n))
+         (! y (term (BitVec n))
+         (! bx bblt
+         (! by bblt
+         (! f formula
+         (! bbx (bblast_term n x bx)
+         (! bby (bblast_term n y by)
+         (! c (^ (bblast_eq by bx) f)
+            (th_holds (iff (= (BitVec n) x y) f))))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVULT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvult ((x bblt) (y bblt) (n mpz)) formula
+(match x
+  ( bbltn (fail formula))
+  ((bbltc xi x') (match y
+  	     	   (bbltn (fail formula))
+	 	   ((bbltc yi y') (mp_ifzero n
+		                    (and (not xi) yi)
+				    (or (and (iff xi yi) (bblast_bvult x' y' (mp_add n (~1)))) (and (not xi) yi))))))))
+
+(declare bv_bbl_bvult
+	 (! n mpz
+	 (! x (term (BitVec n))
+         (! y (term (BitVec n))
+         (! bx bblt
+         (! by bblt
+         (! f formula
+         (! bbx (bblast_term n x bx)
+         (! bby (bblast_term n y by)
+         (! c (^ (bblast_bvult bx by (mp_add n (~1))) f)
+            (th_holds (iff (bvult n x y) f))))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVSLT
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvslt ((x bblt) (y bblt) (n mpz)) formula
+(match x
+  ( bbltn (fail formula))
+  ((bbltc xi x') (match y
+  	     	   (bbltn (fail formula))
+	 	   ((bbltc yi y') (mp_ifzero (mpz_sub n 1)
+		   	      	  	     (and xi (not yi))
+		   	      		     (or (and (iff xi yi)
+					     	      (bblast_bvult x' y' (mpz_sub n 2)))
+					     	 (and xi (not yi)))))))))
+
+(declare bv_bbl_bvslt
+	 (! n mpz
+	 (! x (term (BitVec n))
+         (! y (term (BitVec n))
+         (! bx bblt
+         (! by bblt
+         (! f formula
+         (! bbx (bblast_term n x bx)
+         (! bby (bblast_term n y by)
+         (! c (^ (bblast_bvslt bx by n) f)
+            (th_holds (iff (bvslt n x y) f))))))))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BITBLAST BVCOMP
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(program bblast_bvcomp ((x bblt) (y bblt) (n mpz)) bblt
+  (match x ((bbltc bx x') (match y ((bbltc by y')
+  	   	                      (bbltc (bblast_eq_rec x' y' (iff bx by)) bbltn))
+                                   (default (fail bblt))))
+           (default (fail bblt))
+	   ))
+
+(declare bv_bbl_bvcomp (! n mpz
+                       (! x (term (BitVec n))
+		       (! y (term (BitVec n))
+		       (! xb bblt
+		       (! yb bblt
+		       (! rb bblt
+		       (! xbb (bblast_term n x xb)
+		       (! ybb (bblast_term n y yb)
+                       (! c (^ (bblast_bvcomp xb yb n) rb)
+                              (bblast_term 1 (bvcomp n x y) rb)))))))))))
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;           BITBLASTING CONNECTORS
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+; bit-blasting connections
+
+(declare intro_assump_t
+	 (! f formula
+	 (! v var
+	 (! C clause
+	 (! h (th_holds f)
+	 (! a (atom v f)
+	 (! u (! unit (holds (clc (pos v) cln))
+	      	 (holds C))
+	 (holds C))))))))
+
+(declare intro_assump_f
+	 (! f formula
+	 (! v var
+	 (! C clause
+	 (! h (th_holds (not f))
+	 (! a (atom v f)
+	 (! u (! unit (holds (clc (neg v) cln))
+	      	 (holds C))
+	 (holds C))))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;
+;;           REWRITE RULES
+;;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+
+; rewrite rule :
+; x + y = y + x
+(declare bvadd_symm
+	 (! n mpz
+	 (! x (term (BitVec n))
+	 (! y (term (BitVec n))
+	    (th_holds (= (BitVec n) (bvadd n x y) (bvadd n y x)))))))
+
+;; (declare bvcrazy_rewrite
+;; 	 (! n mpz
+;; 	 (! x (term (BitVec n))
+;; 	 (! y (term (BitVec n))
+;; 	 (! xn bv_poly
+;; 	 (! yn bv_poly
+;; 	 (! hxn (bv_normalizes x xn)
+;; 	 (! hyn (bv_normalizes y yn)
+;; 	 (! s (^ (rewrite_scc xn yn) true)
+;; 	 (! u (! x (term (BitVec n)) (holds cln))
+;; 	     (holds cln)))))))))))
+
+;; 	    (th_holds (= (BitVec n) (bvadd x y) (bvadd y x)))))))
+
+
+
+; necessary?
+;; (program calc_bvand ((a bv) (b bv)) bv
+;;   (match a
+;;     (bvn (match b (bvn bvn) (default (fail bv))))
+;;     ((bvc ba a') (match b
+;;                       ((bvc bb b') (bvc (match ba (b0 b0) (b1 bb)) (calc_bvand a' b')))
+;;                       (default (fail bv))))))
+
+;; ; rewrite rule (w constants) :
+;; ; a & b = c
+;; (declare bvand_const (! c bv
+;; 		     (! a bv
+;;                      (! b bv
+;;                      (! u (^ (calc_bvand a b) c)
+;;                         (th_holds (= BitVec (bvand (a_bv a) (a_bv b)) (a_bv c))))))))
+
+
+;; making constant bit-vectors
+(program mk_ones ((n mpz)) bv
+	(mp_ifzero n bvn (bvc b1 (mk_ones (mpz_sub n 1)))))
+
+(program mk_zero ((n mpz)) bv
+	(mp_ifzero n bvn (bvc b0 (mk_ones (mpz_sub n 1)))))
+
+
+
+;; (bvxnor a b) => (bvnot (bvxor a b))
+;; (declare bvxnor_elim
+;; 	 (! n mpz
+;; 	 (! a (term (BitVec n))
+;; 	 (! b (term (BitVec n))
+;; 	 (! a' (term (BitVec n))
+;; 	 (! b' (term (BitVec n))
+;; 	 (! rwa (rw_term _ a a')
+;; 	 (! rwb (rw_term _ b b')
+;; 	 (rw_term n (bvxnor _ a b)
+;; 	 	  (bvnot _ (bvxor _ a' b')))))))))))
+
+
+
+;; ;; (bvxor a 0) => a
+;; (declare bvxor_zero
+;; 	 (! n mpz
+;; 	 (! zero_bits bv
+;; 	 (! sc (^ (mk_zero n)  zero_bits)
+;; 	 (! a (term (BitVec n))
+;; 	 (! b (term (BitVec n))
+;; 	 (! a' (term (BitVec n))
+;; 	 (! rwa (rw_term _  a a')
+;; 	 (! rwb (rw_term _ b (a_bv _ zero_bits))
+;; 	 (rw_term _  (bvxor _ a b)
+;; 	 	  a'))))))))))
+
+;; ;; (bvxor a 11) => (bvnot a)
+;; (declare bvxor_one
+;; 	 (! n mpz
+;; 	 (! one_bits bv
+;; 	 (! sc (^ (mk_ones n)  one_bits)
+;; 	 (! a (term (BitVec n))
+;; 	 (! b (term (BitVec n))
+;; 	 (! a' (term (BitVec n))
+;; 	 (! rwa (rw_term _  a a')
+;; 	 (! rwb (rw_term _  b (a_bv _ one_bits))
+;; 	 (rw_term _ (bvxor _ a b)
+;; 	 	  (bvnot _ a')))))))))))
+
+
+;; ;; (bvnot (bvnot a)) => a
+;; (declare bvnot_idemp
+;; 	 (! n mpz
+;; 	 (! a (term (BitVec n))
+;; 	 (! a' (term (BitVec n))
+;; 	 (! rwa (rw_term _  a a')
+;; 	 (rw_term _ (bvnot _ (bvnot _ a))
+;; 	 	  a'))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Theory of Arrays
+;
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+; depends on : th_base.plf
+
+; sorts
+
+(declare Array (! s1 sort (! s2 sort sort)))	; s1 is index, s2 is element
+
+; functions
+(declare write (! s1 sort
+               (! s2 sort
+                 (term (arrow (Array s1 s2)
+                       (arrow s1
+                       (arrow s2 (Array s1 s2))))))))
+
+(declare read (! s1 sort
+              (! s2 sort
+              	(term (arrow (Array s1 s2)
+               	      (arrow s1 s2))))))
+
+; inference rules
+
+; read( a[i] = b, i ) == b
+(declare row1 (! s1 sort
+              (! s2 sort
+              (! t1 (term (Array s1 s2))
+              (! t2 (term s1)
+              (! t3 (term s2)
+              	(th_holds (= _
+		(apply _ _ (apply _ _ (read s1 s2) (apply _ _ (apply _ _ (apply _ _ (write s1 s2) t1) t2) t3)) t2) t3))))))))
+
+; read( a[i] = b, j ) == read( a, j ) if i != j
+(declare row (! s1 sort
+             (! s2 sort
+             (! t2 (term s1)
+             (! t3 (term s1)
+             (! t1 (term (Array s1 s2))
+             (! t4 (term s2)
+             (! u (th_holds (not (= _ t2 t3)))
+               (th_holds (= _ (apply _ _ (apply _ _ (read s1 s2) (apply _ _ (apply _ _ (apply _ _ (write s1 s2) t1) t2) t4)) t3)
+               		      (apply _ _ (apply _ _ (read s1 s2) t1) t3)))))))))))
+
+; i == j if read( a, j ) != read( a[i] = b, j )
+(declare negativerow (! s1 sort
+                     (! s2 sort
+                     (! t2 (term s1)
+                     (! t3 (term s1)
+                     (! t1 (term (Array s1 s2))
+                     (! t4 (term s2)
+		     (! u (th_holds (not (= _
+                        (apply _ _ (apply _ _ (read s1 s2) (apply _ _ (apply _ _ (apply _ _ (write s1 s2) t1) t2) t4)) t3)
+                        (apply _ _ (apply _ _ (read s1 s2) t1) t3))))
+                     (th_holds (= _ t2 t3))))))))))
+
+(declare ext (! s1 sort
+             (! s2 sort
+             (! t1 (term (Array s1 s2))
+             (! t2 (term (Array s1 s2))
+             (! u1 (! k (term s1)
+                   (! u2 (th_holds (or (= _ t1 t2) (not (= _ (apply _ _ (apply _ _ (read s1 s2) t1) k) (apply _ _ (apply _ _ (read s1 s2) t2) k)))))
+                     (holds cln)))
+               (holds cln)))))))
+(declare Int sort)
+
+(define arithpred_Int (! x (term Int)
+                      (! y (term Int)
+                        formula)))
+
+(declare >_Int arithpred_Int)
+(declare >=_Int arithpred_Int)
+(declare <_Int  arithpred_Int)
+(declare <=_Int arithpred_Int)
+
+(define arithterm_Int (! x (term Int)
+		      (! y (term Int)
+		        (term Int))))
+
+(declare +_Int arithterm_Int)
+(declare -_Int arithterm_Int)
+(declare *_Int arithterm_Int)  ; is * ok to use?
+(declare /_Int arithterm_Int)  ; is / ok to use?
+
+; a constant term
+(declare a_int (! x mpz (term Int)))
+
+; unary negation
+(declare u-_Int (! t (term Int) (term Int)))
+(declare forall (! s sort
+                (! t (term s)
+                (! f formula
+                  formula))))
+
+;This program recursively checks the instantiation.
+;Composite terms (such as "apply _ _ ...") are handled recursively.
+;Then, if ti and t are equal, we return true. Otherwise, we first verify that t is the variable for which ti is substitued (ifmarked). if this is the case, ti should be equal to k.
+
+(program count_apps ((s sort) (t (term s))) mpz
+  (match t
+    ((apply s1 _ f a)
+      (mp_add 1
+        (mp_add (count_apps s1 a)
+                (count_apps (arrow s1 s) f))))
+    (default 0)))
+
+;(program is_inst_t ((s sort) (ti (term s)) (t (term s)) (k (term s))) bool
+; (match t
+;   ((apply s1 s2 t1 t2)
+;     (match ti
+;       ((apply si1 si2 ti1 ti2) 
+;           (match (is_inst_t ti1 t1 k) (tt (is_inst_t ti2 t2 k)) (ff ff)))
+;       (default ff)))
+;   (default (ifequal ti t tt (ifmarked t (ifequal ti k tt ff) ff)))))
+;
+;
+;(program is_inst_f ((fi formula) (f formula) (k term)) bool
+;  (match f
+;    ((and f1 f2) (match fi
+;    		   ((and fi1 fi2) (match (is_inst_f fi1 f1 k) (tt (is_inst_f fi2 f2 k)) (ff ff)))
+;    		   (default ff)))
+;    ((or f1 f2) (match fi
+;    		   ((or fi1 fi2) (match (is_inst_f fi1 f1 k) (tt (is_inst_f fi2 f2 k)) (ff ff)))
+;    		   (default ff)))
+;    ((impl f1 f2) (match fi
+;    		   ((impl fi1 fi2) (match (is_inst_f fi1 f1 k) (tt (is_inst_f fi2 f2 k)) (ff ff)))
+;    		   (default ff)))
+;    ((not f1) (match fi
+;    		   ((not fi1) (is_inst_f fi1 f1 k))
+;    		   (default ff)))
+;    ((iff f1 f2) (match fi
+;    		   ((iff fi1 fi2) (match (is_inst_f fi1 f1 k) (tt (is_inst_f fi2 f2 k)) (ff ff)))
+;    		   (default ff)))
+;    ((xor f1 f2) (match fi
+;    		   ((xor fi1 fi2) (match (is_inst_f fi1 f1 k) (tt (is_inst_f fi2 f2 k)) (ff ff)))
+;    		   (default ff)))
+;    ((ifte f1 f2 f3) (match fi
+;    		       ((ifte fi1 fi2 fi3) (match (is_inst_f fi1 f1 k)
+;    		       			     (tt (match (is_inst_f fi2 f2 k) (tt (is_inst_f fi3 f3 k)) (ff ff)))
+;    		       			     (ff ff)))
+;    		       (default ff)))
+;    ((= s t1 t2) (match fi
+;    		   ((= s ti1 ti2) (match (is_inst_t ti1 t1 k) (tt (is_inst_t ti2 t2 k)) (ff ff)))
+;    		   (default ff)))
+;    ((forall s t1 f1) (match fi
+;    		      ((forall s ti1 fi1) (is_inst_f fi1 f1 k))
+;    		      (default ff)))
+;    (default ff)))
+;
+;(program is_inst ((fi formula) (f formula) (t term) (k term)) bool
+;  (do (markvar t)
+;     (let f1 (is_inst_f fi f k)
+;        (do (markvar t) f1))))
+;
+;(declare skolem
+;  (! s sort
+;  (! t (term s)
+;  (! f formula
+;  (! p (th_holds (not (forall s t f)))
+;  (! u (! k (term s)
+;       (! fi formula
+;       (! p1 (th_holds (not fi))
+;       (! r (^ (is_inst fi f t k) tt)
+;         (holds cln)))))
+;    (holds cln)))))))
+
+;(declare inst
+;  (! s sort
+;  (! t (term s)
+;  (! f formula
+;  (! k (term s)
+;  (! fi formula
+;  (! p (th_holds (forall s t f))
+;  (! r (^ (is_inst fi f t k) tt)
+;  (! u (! p1 (th_holds fi)
+;            (holds cln))
+;    (holds cln))))))))))
+; Depends On: th_smt.plf
+(declare Real sort)
+
+(define arithpred_Real (! x (term Real)
+                       (! y (term Real)
+                         formula)))
+(declare >_Real arithpred_Real)
+(declare >=_Real arithpred_Real)
+(declare <_Real  arithpred_Real)
+(declare <=_Real arithpred_Real)
+
+(define arithterm_Real (! x (term Real)
+                       (! y (term Real)
+                         (term Real))))
+
+(declare +_Real arithterm_Real)
+(declare -_Real arithterm_Real)
+(declare *_Real arithterm_Real)  ; is * ok to use?
+(declare /_Real arithterm_Real)  ; is / ok to use?
+
+; a constant term
+(declare a_real (! x mpq (term Real)))
+
+(declare >=0_Real (! x (term Real) formula))
+(declare =0_Real (! x (term Real) formula))
+(declare >0_Real (! x (term Real) formula))
+(declare distinct0_Real (! x (term Real) formula))
+
+; unary negation
+(declare u-_Real (! t (term Real) (term Real)))
+
+; Is this rational positive?
+(program mpq_ispos ((x mpq)) bool
+  (mp_ifneg x ff (mp_ifzero x ff tt)))
+; Depends on th_real.plf, th_int.plf, smt.plf, sat.plf
+
+; Some axiom arguments are marked "; Omit", because they can be deduced from
+; other arguments and should be replaced with a "_" when invoking the axiom.
+
+;; ====================================== ;;
+;; Arith Terms, Predicates, & Conversions ;;
+;; ====================================== ;;
+
+; Types for arithmetic variables
+; Specifically a real
+(declare real_var type)
+; Specifically an integer
+(declare int_var type)
+
+; Functions to map them to terms
+(declare term_real_var (! v real_var (term Real)))
+(declare term_int_var (! v int_var (term Int)))
+
+; A function to cast an integer term to real.
+(declare term_int_to_real (! i (term Int) (term Real)))
+
+
+; The recursive functions `reify_int_term` and `reify_real_term` work
+; together to  reify or "make real" an integer term. That is, to convert it to
+; a real term.  More precisely, they take an integer term and return a real
+; term in which any integer variables are immediately converted to real terms,
+; and all non-leaves in the term are real-sorted.
+;
+; They explicitly do not work on integer division, because such a conversion
+; would not be correct when integer division is involved.
+
+; This function recursively converts an integer term to a real term.
+(program reify_int_term ((t (term Int))) (term Real)
+  (match t
+    ((term_int_var v) (term_int_to_real (term_int_var v)))
+    ((a_int i) (a_real (mpz_to_mpq i)))
+    ((+_Int x y) (+_Real (reify_int_term x) (reify_int_term y)))
+    ((-_Int x y) (-_Real (reify_int_term x) (reify_int_term y)))
+    ((u-_Int x) (u-_Real (reify_int_term x)))
+    ((*_Int x y) (*_Real (reify_int_term x) (reify_int_term y)))
+    ; Reifying integer division is an error, since it changes the value!
+    ((/_Int x y) (fail (term Real)))
+  ))
+
+; This function recursively converts a real term to a real term.
+; It will never change the top-level node in the term (since that node is
+; real), but it may change subterms...
+(program reify_real_term ((t (term Real))) (term Real)
+  (match t
+    ((term_real_var v) (term_real_var v))
+    ((a_real v) (a_real v))
+    ; We've found an integer term -- reify it!
+    ((term_int_to_real t') (reify_int_term t'))
+    ((+_Real x y) (+_Real (reify_real_term x) (reify_real_term y)))
+    ((-_Real x y) (-_Real (reify_real_term x) (reify_real_term y)))
+    ((u-_Real x) (u-_Real (reify_real_term x)))
+    ((*_Real x y) (*_Real (reify_real_term x) (reify_real_term y)))
+    ((/_Real x y) (/_Real (reify_real_term x) (reify_real_term y)))
+  ))
+
+; Predicates of the form (term Integer) (comparison) (term Real)
+(define arithpred_IntReal (! x (term Int)
+                          (! y (term Real)
+                          formula)))
+(declare >_IntReal arithpred_IntReal)
+(declare >=_IntReal arithpred_IntReal)
+(declare <_IntReal  arithpred_IntReal)
+(declare <=_IntReal arithpred_IntReal)
+
+; From an arith predicate, compute the equivalent real predicate
+; All arith predicates are (possibly negated) >='s with a real on the right.
+; Technically it's a real literal on the right, but we don't assume that here.
+(program reify_arith_pred ((p formula)) formula
+  (match p
+         ((not p') (not (reify_arith_pred p')))
+         ((>=_Real x y) (>=_Real (reify_real_term x) (reify_real_term y)))
+         ((>=_Int x y) (>=_Real (reify_int_term x) (reify_int_term y)))
+         ((>=_IntReal x y) (>=_Real (reify_int_term x) (reify_real_term y)))
+         (default (fail formula))
+         ))
+
+; From an arith predicate, prove the equivalent real predicate
+(declare pf_reified_arith_pred
+  (! p formula
+  (! p' formula
+    (! pf (th_holds p)
+      (! reify_sc (^ (reify_arith_pred p) p')
+         (th_holds p'))))))
+
+;; ========================== ;;
+;; Int Bound Tightening Rules ;;
+;; ========================== ;;
+
+; Returns whether `ceil` is the ceiling of `q`.
+(program is_ceil ((q mpq) (ceil mpz)) bool
+  (let diff (mp_add (mpz_to_mpq ceil) (mp_neg q))
+    (mp_ifneg diff
+              ff
+              (mp_ifneg (mp_add diff (~ 1/1))
+                        tt
+                        ff))))
+
+; Returns whether `n` is the greatest integer less than `q`.
+(program is_greatest_integer_below ((n mpz) (q mpq)) bool
+  (is_ceil q (mp_add n 1)))
+
+
+; Negates terms of the form:
+; (a) k     OR
+; (b) x     OR
+; (c) k * x
+; where k is a constant and x is a variable.
+; Otherwise fails.
+; This aligns closely with the LFSCArithProof::printLinearMonomialNormalizer
+; function.
+(program negate_linear_monomial_int_term ((t (term Int))) (term Int)
+  (match t
+    ((term_int_var v) (*_Int (a_int (~ 1)) (term_int_var v)))
+    ((a_int k) (a_int (mp_neg k)))
+    ((*_Int x y)
+     (match x
+            ((a_int k)
+             (match y
+                    ((term_int_var v) (*_Int (a_int (mp_neg k)) y))
+                    (default (fail (term Int)))))
+            (default (fail (term Int)))))
+    (default (fail (term Int)))
+  ))
+
+; This function negates linear interger terms---sums of terms of the form
+; recognized by `negate_linear_monomial_int_term`.
+(program negate_linear_int_term ((t (term Int))) (term Int)
+  (match t
+    ((term_int_var v) (negate_linear_monomial_int_term t))
+    ((a_int i) (negate_linear_monomial_int_term t))
+    ((+_Int x y) (+_Int (negate_linear_int_term x) (negate_linear_int_term y)))
+    ((*_Int x y) (negate_linear_monomial_int_term t))
+    (default (fail (term Int)))
+  ))
+
+; Statement that z is the greatest integer less than z'.
+(declare holds_neg_of_greatest_integer_below_int
+  (! z mpz
+  (! z' mpz
+    type)))
+
+; For proving statements of the above form.
+(declare check_neg_of_greatest_integer_below_int
+  (! z mpz
+  (! z' mpz
+    (! sc_check (^ (is_greatest_integer_below (mp_neg z) (mpz_to_mpq z')) tt)
+       (holds_neg_of_greatest_integer_below_int z z')))))
+
+; Axiom for tightening [Int] < i into -[Int] >= -(i - 1).
+; Note that [Int] < i is actually not([Int] >= i)
+(declare tighten_not_>=_IntInt
+  (! t       (term Int)  ; Omit
+  (! neg_t   (term Int)  ; Omit
+  (! old_bound     mpz ; Omit
+  (! neg_int_bound mpz ; Omit
+    (! pf_step (holds_neg_of_greatest_integer_below_int neg_int_bound old_bound)
+    ; Note that even when the RHS is an integer, we convert it to real and use >_IntReal
+    (! pf_real_bound (th_holds (not (>=_IntReal t (term_int_to_real (a_int old_bound)))))
+      (! sc_neg (^ (negate_linear_int_term t) neg_t)
+        (th_holds (>=_IntReal neg_t (term_int_to_real (a_int neg_int_bound))))))))))))
+
+;; ======================================== ;;
+;; Linear Combinations and Affine functions ;;
+;; ======================================== ;;
+
+; Unifying type for both kinds of arithmetic variables
+(declare arith_var type)
+(declare av_from_int (! v int_var arith_var))
+(declare av_from_real (! v real_var arith_var))
+
+; Total order type -- return value for the comparison of two things
+(declare ord type)
+(declare ord_lt ord)
+(declare ord_eq ord)
+(declare ord_gt ord)
+
+; Compare two arith vars. Integers come before reals, and otherwise we use the
+; LFSC ordering
+(program arith_var_cmp ((v1 arith_var) (v2 arith_var)) ord
+  (match v1
+    ((av_from_int  i1)
+      (match v2
+        ((av_from_int  i2)
+          (ifequal i1 i2
+            ord_eq
+            (compare i1 i2 ord_lt ord_gt)))
+        ((av_from_real r2) ord_lt)))
+    ((av_from_real r1)
+      (match v2
+        ((av_from_int  i2) ord_gt)
+        ((av_from_real r2)
+          (ifequal r1 r2
+            ord_eq
+            (compare r1 r2 ord_lt ord_gt)))))))
+
+; Type for linear combinations of variables
+; NB: Functions below will assume that the list is always sorted by variable!
+(declare lc type)
+(declare lc_null lc)
+(declare lc_cons (! c mpq (! v arith_var (! rest lc lc))))
+
+; Sum of linear combinations.
+(program lc_add ((l1 lc) (l2 lc)) lc
+  (match l1
+    (lc_null l2)
+    ((lc_cons c1 v1 l1')
+      (match l2
+        (lc_null l1)
+        ((lc_cons c2 v2 l2')
+          (match (arith_var_cmp v1 v2)
+            (ord_lt (lc_cons c1 v1 (lc_add l1' l2)))
+            (ord_eq
+              (let c (mp_add c1 c2)
+                (mp_ifzero c
+                  (lc_add l1' l2')
+                  (lc_cons c v1 (lc_add l1' l2')))))
+            (ord_gt (lc_cons c2 v2 (lc_add l1 l2')))))))))
+
+; Scaling a linear combination
+(program lc_mul_c ((l lc) (c mpq)) lc
+  (match l
+    (lc_null l)
+    ((lc_cons c' v' l') (lc_cons (mp_mul c c') v' (lc_mul_c l' c)))))
+
+; Negating a linear combination
+(program lc_neg ((l lc)) lc
+         (lc_mul_c l (~ 1/1)))
+
+; An affine function of variables (a linear combination + a constant)
+(declare aff type)
+(declare aff_cons (! c mpq (! l lc aff)))
+
+; Sum of affine functions
+(program aff_add ((p1 aff) (p2 aff)) aff
+  (match p1
+    ((aff_cons c1 l1)
+      (match p2
+        ((aff_cons c2 l2) (aff_cons (mp_add c1 c2) (lc_add l1 l2)))))))
+
+; Scaling an affine function
+(program aff_mul_c ((p aff) (c mpq)) aff
+  (match p
+    ((aff_cons c' l') (aff_cons (mp_mul c' c) (lc_mul_c l' c)))))
+
+; Negating an affine function
+(program aff_neg ((p aff)) aff
+  (aff_mul_c p (~ 1/1)))
+
+; Subtracting affine functions
+(program aff_sub ((p1 aff) (p2 aff)) aff
+  (aff_add p1 (aff_neg p2)))
+
+;; ================================= ;;
+;; Proving (Real) terms to be affine ;;
+;; ================================= ;;
+
+; truth type for some real term being affine
+; * `t` the real term
+; * `a` the equivalent affine function
+(declare is_aff (! t (term Real) (! a aff type)))
+
+; Constants are affine
+(declare is_aff_const
+  (! x mpq
+    (is_aff (a_real x) (aff_cons x lc_null))))
+
+; Real variables are affine
+(declare is_aff_var_real
+  (! v real_var
+    (is_aff (term_real_var v)
+            (aff_cons 0/1 (lc_cons 1/1 (av_from_real v) lc_null)))))
+
+; Int variables are affine
+(declare is_aff_var_int
+  (! v int_var
+    (is_aff (term_int_to_real (term_int_var v))
+            (aff_cons 0/1 (lc_cons 1/1 (av_from_int v) lc_null)))))
+
+; affine functions are closed under addition
+(declare is_aff_+
+  (! x (term Real)      ; Omit
+  (! aff_x aff          ; Omit
+  (! y (term Real)      ; Omit
+  (! aff_y aff          ; Omit
+  (! aff_z aff          ; Omit
+    (! is_affx (is_aff x aff_x)
+    (! is_affy (is_aff y aff_y)
+      (! a (^ (aff_add aff_x aff_y) aff_z)
+        (is_aff (+_Real x y) aff_z))))))))))
+
+; affine functions are closed under subtraction
+(declare is_aff_-
+  (! x (term Real)      ; Omit
+  (! aff_x aff          ; Omit
+  (! y (term Real)      ; Omit
+  (! aff_y aff          ; Omit
+  (! aff_z aff          ; Omit
+    (! is_affx (is_aff x aff_x)
+    (! is_affy (is_aff y aff_y)
+      (! a (^ (aff_sub aff_x aff_y) aff_z)
+        (is_aff (-_Real x y) aff_z))))))))))
+
+; affine functions are closed under left-multiplication by scalars
+(declare is_aff_mul_c_L
+  (! y (term Real)      ; Omit
+  (! aff_y aff          ; Omit
+  (! aff_z aff          ; Omit
+    (! x mpq
+    (! is_affy (is_aff y aff_y)
+      (! a (^ (aff_mul_c aff_y x) aff_z)
+        (is_aff (*_Real (a_real x) y) aff_z))))))))
+
+; affine functions are closed under right-multiplication by scalars
+(declare is_aff_mul_c_R
+  (! y (term Real)      ; Omit
+  (! aff_y aff          ; Omit
+  (! aff_z aff          ; Omit
+    (! x mpq
+    (! is_affy (is_aff y aff_y)
+      (! a (^ (aff_mul_c aff_y x) aff_z)
+        (is_aff (*_Real y (a_real x)) aff_z))))))))
+
+;; ========================== ;;
+;; Bounds on Affine Functions ;;
+;; ========================== ;;
+
+; Bounds that an affine function might satisfy
+(declare bound type)
+(declare bound_pos bound)           ; > 0
+(declare bound_non_neg bound)       ; >= 0
+
+; formulas over affine functions
+; the statement that `a` satisfies `b` for all inputs
+(declare bounded_aff (! a aff (! b bound formula)))
+
+; Sum of two bounds (the bound satisfied by the sum of two functions satifying
+; the input bounds)
+(program bound_add ((b bound) (b2 bound)) bound
+  (match b
+    (bound_pos bound_pos)
+    (bound_non_neg b2)))
+
+; The implication of `a1` satisfying `b` and `a2` satisfying `b2`, obtained by
+; summing the inequalities.
+(program bounded_aff_add ((a1 aff) (b bound) (a2 aff) (b2 bound)) formula
+  (bounded_aff (aff_add a1 a2) (bound_add b b2)))
+
+
+; The implication of scaling the inequality of `a1` satisfying `b`.
+(program bounded_aff_mul_c ((a1 aff) (b bound) (c mpq)) formula
+  (match (mpq_ispos c)
+    (tt (bounded_aff (aff_mul_c a1 c) b))
+    (ff (fail formula))))
+
+; Does an affine function actuall satisfy a bound, for some input?
+(program bound_respected ((b bound) (a aff)) bool
+  (match a
+    ((aff_cons c combo)
+      (match combo
+        (lc_null
+          (match b
+            (bound_pos (mpq_ispos c))
+            (bound_non_neg (mp_ifneg c ff tt))))
+        (default tt)))))
+
+;; =================================== ;;
+;; Axioms for bounded affine functions ;;
+;; =================================== ;;
+
+; Always true (used as a initial value when summing many bounds together)
+(declare bounded_aff_ax_0_>=_0
+  (th_holds (bounded_aff (aff_cons 0/1 lc_null) bound_non_neg)))
+
+; Contradiction axiom: an affine function that does not respect its bounds
+(declare bounded_aff_contra
+  (! a aff      ; Omit
+  (! b bound    ; Omit
+    (! pf (th_holds (bounded_aff a b))
+      (! sc (^ (bound_respected b a) ff)
+         (th_holds false))))))
+
+; Rule for summing two affine bounds to get a third
+(declare bounded_aff_add
+  (! a1 aff             ; Omit
+  (! a2 aff             ; Omit
+  (! b bound            ; Omit
+  (! b2 bound           ; Omit
+  (! ba_sum formula     ; Omit
+    (! pf_a1 (th_holds (bounded_aff a1 b))
+    (! pf_a2 (th_holds (bounded_aff a2 b2))
+       (! sc (^ (bounded_aff_add a1 b a2 b2) ba_sum)
+         (th_holds ba_sum))))))))))
+
+; Rule for scaling an affine bound
+(declare bounded_aff_mul_c
+  (! a aff          ; Omit
+  (! b bound        ; Omit
+  (! ba formula     ; Omit
+    (! c mpq
+    (! pf_a (th_holds (bounded_aff a b))
+       (! sc (^ (bounded_aff_mul_c a b c) ba)
+         (th_holds ba))))))))
+
+
+; [y >= x] implies that the aff. function y - x is >= 0
+(declare aff_>=_from_term
+  (! y (term Real)  ; Omit
+  (! x (term Real)  ; Omit
+  (! p aff          ; Omit
+    (! pf_affine (is_aff (-_Real y x) p)
+    (! pf_term_bound (th_holds (>=_Real y x))
+      (th_holds (bounded_aff p bound_non_neg))))))))
+
+; not [y >= x] implies that the aff. function -(y - x) is > 0
+(declare aff_>_from_term
+  (! y (term Real)  ; Omit
+  (! x (term Real)  ; Omit
+  (! p aff          ; Omit
+  (! p_n aff        ; Omit
+    (! pf_affine (is_aff (-_Real y x) p)
+    (! pf_term_bound (th_holds (not (>=_Real y x)))
+      (! sc_neg (^ (aff_neg p) p_n)
+        (th_holds (bounded_aff p_n bound_pos))))))))))
+

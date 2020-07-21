@@ -127,7 +127,7 @@ impl Env {
                         Ok(aa)
                     }
                     // TODO remove?
-                    (Expr::Ref(x), Expr::Ref(y)) if &x.name == &y.name => Ok(aa),
+                    // (Expr::Ref(x), Expr::Ref(y)) if &x.name == &y.name => Ok(aa),
                     _ => Err(LfscError::TypeMismatch((*aa).clone(), (*bb).clone())),
                 })?)
             }

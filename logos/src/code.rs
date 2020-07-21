@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::convert::From;
 use std::fmt::{self, Display, Formatter};
 use std::rc::Rc;
@@ -16,13 +17,19 @@ macro_rules! try_ {
             Ok(o) => o,
             Err(e) => return Err(e),
         }
-    }
+    };
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Binding {
+    Var(Rc<Ref>),
+    Hole,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Pattern {
     Default,
-    App(Rc<Expr>, Vec<Rc<Ref>>),
+    App(Rc<Expr>, Vec<Binding>),
     Const(Rc<Expr>),
 }
 
@@ -97,7 +104,6 @@ impl From<Token> for Cond {
 
 impl Code {
     pub fn sub(&self, name: &str, value: &Rc<Expr>) -> Self {
-        //eprintln!("Sub: {}/{} in {}", value, name, self);
         match self {
             &Code::App(ref f, ref args) => Code::App(
                 Expr::sub(f, name, value),
@@ -114,6 +120,14 @@ impl Code {
             &Code::RatLit(_) => self.clone(),
             _ => todo!("NYI: sub over {}", self),
         }
+    }
+}
+
+fn consume_new_binding(ts: &mut Lexer) -> Result<Binding, LfscError> {
+    match ts.require_next()? {
+        Token::Hole => Ok(Binding::Hole),
+        Token::Ident => Ok(Binding::Var(Rc::new(Ref::new(ts.str().to_owned())))),
+        t => Err(LfscError::WrongToken(Token::Ident, t)),
     }
 }
 
@@ -215,10 +229,7 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
                     }
                     Ok(Code::App(fun, args))
                 }
-                t => Err(LfscError::UnexpectedToken(
-                    "term head",
-                    t,
-                )),
+                t => Err(LfscError::UnexpectedToken("term head", t)),
             }?;
             ts.consume_tok(Token::Close)?;
             Ok(r)
@@ -234,17 +245,21 @@ fn parse_case(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Pattern, Code
             let fun = e.expr_value(ts.consume_ident()?)?.clone();
             let mut bindings = Vec::new();
             while Some(Token::Close) != ts.peek() {
-                bindings.push(consume_new_ref(ts)?);
+                bindings.push(consume_new_binding(ts)?);
             }
             ts.consume_tok(Token::Close)?;
             let os = bindings
                 .iter()
-                .map(|v| {
-                    e.bind(
-                        v.name.clone(),
-                        Rc::new(Expr::Ref(v.clone())),
-                        cs.bot.clone(),
-                    )
+                .filter_map(|v| {
+                    if let Binding::Var(v) = v {
+                        Some(e.bind(
+                            v.name.clone(),
+                            Rc::new(Expr::Ref(v.clone())),
+                            cs.bot.clone(),
+                        ))
+                    } else {
+                        None
+                    }
                 })
                 .collect::<Vec<_>>();
             let r = Pattern::App(fun, bindings);
@@ -263,6 +278,15 @@ fn parse_case(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Pattern, Code
     }?;
     ts.consume_tok(Token::Close)?;
     Ok(r)
+}
+
+impl Display for Binding {
+    fn fmt(&self, f: &mut Formatter) -> fmt::Result {
+        match self {
+            Binding::Hole => write!(f, "_"),
+            Binding::Var(v) => write!(f, "{}", v),
+        }
+    }
 }
 
 impl Display for Pattern {
@@ -351,7 +375,6 @@ impl Display for Code {
 }
 
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
-    //eprintln!("Run: {}", code);
     let r = try_!(match code {
         Code::App(ref fun, ref arg_terms) => {
             let args = try_!(arg_terms
@@ -461,10 +484,15 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                                     let unbinds: Vec<_> = vars
                                         .iter()
                                         .zip(dargs.iter())
-                                        .map(|(ref_, a)| ref_.val.replace(Some(a.clone())))
+                                        .filter_map(|(ref_, a)| match ref_ {
+                                            Binding::Var(var) => {
+                                                Some((var, var.val.replace(Some(a.clone()))))
+                                            }
+                                            Binding::Hole => None,
+                                        })
                                         .collect();
                                     let r = try_!(run_code(e, cs, v));
-                                    for (u, n) in unbinds.into_iter().zip(vars.iter()) {
+                                    for (n, u) in unbinds.into_iter() {
                                         n.val.replace(u);
                                     }
                                     return Ok(r);
@@ -506,7 +534,6 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             }
         }
     });
-    //println!("  => {}", r);
     Ok(r)
 }
 
@@ -567,21 +594,24 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
         }
         Code::App(ref fun, ref args) => {
             let mut ty = e.ty(&fun.name()?)?.clone();
-            //println!("app {} -> {}", fn_name, ty);
             let arg_tys: Vec<_> = args
                 .into_iter()
                 .map(|a| type_code(a, e, cs))
                 .collect::<Result<Vec<_>, _>>()?;
-            for a in arg_tys {
+            for (aty, a) in arg_tys.into_iter().zip(args.iter()) {
                 if let &Expr::Pi {
                     ref dom,
                     ref rng,
                     ref var,
-                    ..
+                    ref dependent,
                 } = ty.as_ref()
                 {
-                    e.unify(&a, dom)?;
-                    ty = Expr::sub(&rng, &var.name, &a);
+                    e.unify(&aty, dom)?;
+                    ty = if *dependent {
+                        Expr::sub(rng, &var.name, &run_code(e, cs, a)?)
+                    } else {
+                        rng.clone()
+                    };
                 } else {
                     return Err(LfscError::UntypableApplication((*ty).clone()));
                 }
@@ -604,36 +634,50 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                             let mut unbinds = Vec::new();
                             for v in vars {
                                 if let Expr::Pi {
-                                    ref dom, ref rng, ..
+                                    ref dom,
+                                    ref rng,
+                                    ref dependent,
+                                    ref var,
                                 } = ty.as_ref()
                                 {
-                                    let o = e.bind(
-                                        v.name.clone(),
-                                        cs.bot.clone(),
-                                        dom.clone(),
-                                    );
-                                    // TODO check for non-dependence
-                                    ty = rng.clone();
-                                    unbinds.push((v.clone(), o));
+                                    let expr = match v {
+                                        Binding::Var(v) => {
+                                            let expr = Rc::new(Expr::Ref(Rc::new(Ref::new(
+                                                v.name.clone(),
+                                            ))));
+                                            let o =
+                                                e.bind(v.name.clone(), expr.clone(), dom.clone());
+                                            // TODO check for non-dependence
+                                            unbinds.push(o);
+                                            expr
+                                        }
+                                        Binding::Hole => Rc::new(Expr::Hole(RefCell::new(None))),
+                                    };
+                                    ty = if *dependent {
+                                        Expr::sub(rng, &var.name, &expr)
+                                    } else {
+                                        rng.clone()
+                                    };
                                 } else {
                                     return Err(LfscError::NonPiPatternHead);
                                 }
                             }
                             e.unify(&ty, &disc_ty)?;
-                            type_code(val, e, cs)
+                            let r = type_code(val, e, cs)?;
+                            for u in unbinds {
+                                e.unbind(u);
+                            }
+                            Ok(r)
                         }
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             e.unify_all(tys.into_iter())
         }
-        Code::Expr(expr) => {
-            match expr.as_ref().name() {
-                Ok(n) => Ok(e.ty(n)?.clone()),
-                Err(_) => unimplemented!("Check {} in code", expr),
-            }
-        }
+        Code::Expr(expr) => match expr.as_ref().name() {
+            Ok(n) => Ok(e.ty(n)?.clone()),
+            Err(_) => unimplemented!("Check {} in code", expr),
+        },
     }?;
-    //println!(" => {}", r);
     Ok(r)
 }

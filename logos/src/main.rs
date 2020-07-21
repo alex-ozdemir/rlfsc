@@ -171,10 +171,6 @@ fn check(
     ex_ty: Option<&Rc<Expr>>,
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
-    //dbg!(create);
-    //if let Some(tt) = ex_ty.as_ref() {
-    //    println!("Ex: {}", tt);
-    //}
     use Token::*;
     let (ast, ty) = match ts.require_next()? {
         Token::Type => Ok((Some(cs.type_.clone()), cs.kind.clone())),
@@ -281,11 +277,12 @@ fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscErr
     }
     let ret_ty = check_create(ts, e, cs, Some(&cs.type_))?.0;
     let pgm_ty = args.iter().rev().fold(ret_ty.clone(), |x, (n, t)| {
+        let dependent = x.free_vars().contains(&n.name);
         Rc::new(Expr::Pi {
             var: n.clone(),
             rng: x,
             dom: t.clone(),
-            dependent: false,
+            dependent,
         })
     });
     e.bind(
