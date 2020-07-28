@@ -11,6 +11,7 @@
 * Tokenizer is **not** character-by-character
    * It's implemented using the `logos` library.
 * Automatically reference-counted expressions using `std::rc::Rc`.
+* No gotos/crazy stuff
 
 
 ## State of Affairs
@@ -23,6 +24,9 @@ on my machine.
 
 This suggests that our tokenization is indeed better, but our checking is
 slower.
+
+We do lots of recursion, without tail recursion, causing us to blow small
+stacks.
 
 ## Type checking algorithm
 
@@ -44,12 +48,13 @@ Notably:
 ## Todos
 
 * Tail Recursion
-   * C historically has had poor support for tail recusion, which is why the
+   * C historically has had poor support for tail recursion, which is why the
       original LFSC manually implemented it with gotos.
    * We can't (and won't) do that in Rust.
-   * We could implement a loop-based tail recursion.
-   * Perhaps it would be better to do a trampoline-based approach?
-      * e.g. with `tramp`.
+   * We should implement a trampoline-based approach
+* Term destruction
+   * When destructing terms (auto-implemented), we go into deep recursion.
+   * We should manually implement some destructors to prevent this.
 * Implement a streaming tokenizer.
    * Right now we need to bring the whole input into memory before tokenizing.
    * Option 1: Modify `logos` to allow this by implementing `logos::Source`
@@ -65,20 +70,3 @@ Notably:
          that high-performance text processing is more complex than most
          people think. I think it would be very hard to match the perf of
          a dedicated library like `logos` or `nom`.
-* Allow for construction-less checking.
-   * Right now we always construct the checked term.
-     We often don't need to.
-   * This isn't hard to do, but it might be worth figuring out how to do it
-      without duplicating too much code.
-      * Idea: initialize a "result" option and map over it?
-* Stop doing substitutions?
-   * The original LFSC implementation represents bound variables as objects
-      which (a) the binding and (b) the uses have pointers to. During
-      instantiation, that variable gets pointed to its value.
-   * Is this better?
-   * This requires them to clone abstractions in order to instantiate them
-      multiple times.
-   * That seems just (nearly?) as base as substitution.
-   * It might enable a single-use optimization.
-      * Does this optimization work?
-      * Does it help?
