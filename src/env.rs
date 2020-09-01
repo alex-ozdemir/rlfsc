@@ -95,8 +95,8 @@ impl Env {
         if Rc::ptr_eq(&a, &b) {
             Ok(a.clone())
         } else {
-            let aa = Expr::deref(a.clone());
-            let bb = Expr::deref(b.clone());
+            let aa = Expr::weak_head_reduce(Expr::deref(a.clone()));
+            let bb = Expr::weak_head_reduce(Expr::deref(b.clone()));
             if aa == bb {
                 Ok(aa.clone())
             } else {
