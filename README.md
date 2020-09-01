@@ -2,7 +2,7 @@
 
 ## Installation Instructions
 
-1. Install the (nightly) Rust toolchain using [Rustup](https://rustup.rs/).
+1. Install the Rust toolchain using [Rustup](https://rustup.rs/).
    * Be sure to add Cargo's bin directory to your path
       * i.e. by adding `export PATH="$HOME/.cargo/bin/:$PATH"` to your rc
          file.
