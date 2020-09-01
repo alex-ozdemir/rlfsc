@@ -1,4 +1,3 @@
-#![feature(move_ref_pattern)]
 use rlimit::{Resource, RLIM_INFINITY};
 use structopt::StructOpt;
 use yansi::Paint;

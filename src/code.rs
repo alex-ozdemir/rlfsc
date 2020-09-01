@@ -399,7 +399,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                             .map(|((ref_, _), a)| ref_.val.replace(Some(a.clone())))
                             .collect();
                         let r = try_!(run_code(e, cs, &body));
-                        for (u, (n, _)) in unbinds.into_iter().zip(formal_args.iter()) {
+                        for (u, (n, _)) in unbinds.into_iter().zip(formal_args.into_iter()) {
                             n.val.replace(u);
                         }
                         Ok(r)
