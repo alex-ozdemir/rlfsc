@@ -15,17 +15,17 @@ pub enum LfscError {
     NoName(Expr),
     #[error("Expect a {0}, but found token `{1:?}`")]
     UnexpectedToken(&'static str, Token),
-    #[error("A Pi-binding's range must have type 'type' or 'kind', but it has type {0:?}")]
+    #[error("A Pi-binding's range must have type 'type' or 'kind', but it has type {0}")]
     InvalidPiRange(Expr),
     #[error("A lambda's type cannot be computed. It must be ascribed.")]
     UnascribedLambda,
-    #[error("a {0:?} cannot be applied")]
+    #[error("Terms of type `{0}` cannot be applied")]
     UntypableApplication(Expr),
-    #[error("`{0:?}` has type `{1:?}`, but was expected to have `{2:?}`")]
+    #[error("`{0}` has type\n\t{1}\n, but was expected to have\n\t{2}")]
     UnexpectedType(Expr, Expr, Expr),
     #[error("Expected a command, but got `{0}`")]
     NotACmd(String),
-    #[error("Identifiers should be declare to have kind type or kind, but {0} was declared to be a `{1:?}`, which has kind `{2:?}`")]
+    #[error("Identifiers should be declare to have kind type or kind, but {0} was declared to be a `{1}`, which has kind `{2}`")]
     BadDeclare(String, Expr, Expr),
     #[error("There most be at least one case")]
     NoCases,
@@ -33,7 +33,7 @@ pub enum LfscError {
     NonPiPatternHead,
     #[error("Types `{0}` and `{1}` do not match")]
     TypeMismatch(Expr, Expr),
-    #[error("Run produced `{0:?}`, but was expected to produce `{1:?}`")]
+    #[error("Run produced `{0}`, but was expected to produce `{1}`")]
     RunWrongResult(Expr, Expr),
     #[error("Input types to mp_* must be rational or natural, not {0:?}")]
     BadMqExpr(Expr),
@@ -49,7 +49,7 @@ pub enum LfscError {
     NotMpzInMpzToMpq(Expr),
     #[error("The applications\n\t{0}\nand\n\t{1}\ncannot be equal because they have different numbers of arguments")]
     AppArgcMismatch(Expr, Expr),
-    #[error("Cannot mark\n\t{0:?}\nbecause it is not a variable.")]
+    #[error("Cannot mark\n\t{0}\nbecause it is not a variable.")]
     CannotMark(Expr),
     #[error("Cannot unify two holes!")]
     TwoHoles,

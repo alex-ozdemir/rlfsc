@@ -375,6 +375,13 @@ impl Display for Code {
 }
 
 pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscError> {
+    if cs.trace_sc {
+        for _ in 0..e.sc_depth {
+            print!(" ");
+        }
+        println!("sc run: {}", code);
+        e.sc_depth += 1;
+    }
     let r = try_!(match code {
         Code::App(ref fun, ref arg_terms) => {
             let args = try_!(arg_terms
@@ -423,8 +430,8 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             Ok(r)
         }
         Code::Cond(c, l, r, t, f) => {
-            let ll = try_!(run_code(e, cs, l));
-            let rr = try_!(run_code(e, cs, r));
+            let ll = Expr::weak_head_reduce(Expr::deref(try_!(run_code(e, cs, l))));
+            let rr = Expr::weak_head_reduce(Expr::deref(try_!(run_code(e, cs, r))));
             if match c {
                 Cond::Equal => Rc::into_raw(ll) == Rc::into_raw(rr),
                 Cond::LessThan => Rc::into_raw(ll) < Rc::into_raw(rr),
@@ -444,37 +451,44 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             .as_ref()
             .mp_bin(*o, try_!(run_code(e, cs, j)).as_ref())
             .map(Rc::new),
-        Code::MpCond(o, i, j, k) => match try_!(run_code(e, cs, i)).as_ref() {
-            Expr::NatLit(ref x) => {
-                if match o {
-                    MpCond::Neg => x < &(0 as u64),
-                    MpCond::Zero => x == &(0 as u64),
-                } {
-                    run_code(e, cs, j)
-                } else {
-                    run_code(e, cs, k)
+        Code::MpCond(o, i, j, k) => {
+            match Expr::weak_head_reduce(Expr::deref(try_!(run_code(e, cs, i)))).as_ref() {
+                Expr::NatLit(ref x) => {
+                    if match o {
+                        MpCond::Neg => x < &(0 as u64),
+                        MpCond::Zero => x == &(0 as u64),
+                    } {
+                        run_code(e, cs, j)
+                    } else {
+                        run_code(e, cs, k)
+                    }
                 }
-            }
-            Expr::RatLit(ref x) => {
-                if match o {
-                    MpCond::Neg => x < &(0 as u64),
-                    MpCond::Zero => x == &(0 as u64),
-                } {
-                    run_code(e, cs, j)
-                } else {
-                    run_code(e, cs, k)
+                Expr::RatLit(ref x) => {
+                    if match o {
+                        MpCond::Neg => x < &(0 as u64),
+                        MpCond::Zero => x == &(0 as u64),
+                    } {
+                        run_code(e, cs, j)
+                    } else {
+                        run_code(e, cs, k)
+                    }
                 }
+                t => Err(LfscError::NotMpInMpCond(*o, t.clone())),
             }
-            t => Err(LfscError::NotMpInMpCond(*o, t.clone())),
-        },
+        }
         Code::Match(disc, cases) => {
-            let d = Expr::deref_holes(try_!(run_code(e, cs, disc)));
+            let d = Expr::weak_head_reduce(Expr::deref_holes(try_!(run_code(e, cs, disc))));
+            let mut ret = None;
             for (pat, v) in cases.iter() {
                 match pat {
-                    Pattern::Default => return run_code(e, cs, v),
+                    Pattern::Default => {
+                        ret = Some(run_code(e, cs, v));
+                        break;
+                    }
                     Pattern::Const(s) => {
                         if Expr::unify_test(s, &d) {
-                            return run_code(e, cs, v);
+                            ret = Some(run_code(e, cs, v));
+                            break;
                         }
                     }
                     Pattern::App(phead, vars) => {
@@ -495,24 +509,27 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
                                     for (n, u) in unbinds.into_iter() {
                                         n.val.replace(u);
                                     }
-                                    return Ok(r);
+                                    ret = Some(Ok(r));
+                                    break;
                                 } else {
-                                    return Err(LfscError::WrongBindingCount(
+                                    ret = Some(Err(LfscError::WrongBindingCount(
                                         (*d).clone(),
                                         dargs.len(),
                                         vars.len(),
                                         pat.clone(),
-                                    ));
+                                    )));
                                 }
                             }
                         }
                     }
                 }
             }
-            Err(LfscError::NoPattern(
-                (*d).clone(),
-                cases.iter().map(|(p, _)| p.clone()).collect(),
-            ))
+            ret.unwrap_or_else(|| {
+                Err(LfscError::NoPattern(
+                    (*d).clone(),
+                    cases.iter().map(|(p, _)| p.clone()).collect(),
+                ))
+            })
         }
         Code::Mark(n, i) => {
             let v = try_!(run_code(e, cs, i));
@@ -534,6 +551,13 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
             }
         }
     });
+    if cs.trace_sc {
+        e.sc_depth -= 1;
+        for _ in 0..e.sc_depth {
+            print!(" ");
+        }
+        println!("sc ret: {}", r);
+    }
     Ok(r)
 }
 

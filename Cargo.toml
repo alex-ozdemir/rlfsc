@@ -1,5 +1,5 @@
 [package]
-name = "logos"
+name = "rlfsc"
 version = "0.1.0"
 authors = ["Alex Ozdemir <aozdemir@hmc.edu>"]
 edition = "2018"
@@ -11,6 +11,9 @@ anyhow = "1.0.31"
 logos = "^0.11.4"
 thiserror = "1.0.18"
 rug = "1.8.0"
+structopt = "0.3"
+yansi = "0.5.0"
+rlimit = "0.4.0"
 
 [profile.release]
 debug = true

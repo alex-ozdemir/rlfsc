@@ -1,5 +1,6 @@
 use logos::{self, Logos};
 use std::str::from_utf8;
+use std::path::PathBuf;
 
 use crate::error::LfscError;
 
@@ -23,6 +24,8 @@ pub enum Token {
     // Function-names
     #[token(b"%")]
     Percent,
+    #[token(b"#")]
+    Pound,
     #[token(b"!")]
     Bang,
     #[token(b"@")]
@@ -104,21 +107,30 @@ pub enum Token {
 /// A peekable lexer
 pub struct Lexer<'a> {
     inner: logos::Lexer<'a, Token>,
+    bytes: &'a [u8],
     peek: Option<Token>,
     peek_slice: &'a [u8],
+    filename: PathBuf,
 }
 
-impl<'a> std::convert::From<logos::Lexer<'a, Token>> for Lexer<'a> {
-    fn from(mut inner: logos::Lexer<'a, Token>) -> Self {
+/// The position of a token
+pub struct Position {
+    pub line_no: usize,
+    pub col_no: usize,
+    pub path: PathBuf,
+}
+
+impl<'a> Lexer<'a> {
+    pub fn new(bytes: &'a [u8], filename: PathBuf) -> Self {
+        let mut inner = Token::lexer(bytes);
         Self {
             peek: inner.next(),
             peek_slice: inner.slice(),
             inner,
+            bytes,
+            filename,
         }
     }
-}
-
-impl<'a> Lexer<'a> {
     pub fn next(&mut self) -> Option<Token> {
         self.peek_slice = self.inner.slice();
         let n = std::mem::replace(&mut self.peek, self.inner.next());
@@ -165,5 +177,35 @@ impl<'a> Lexer<'a> {
         } else {
             Err(LfscError::WrongToken(Token::Ident, t))
         }
+    }
+    pub fn current_line(&self) -> (&str, Position) {
+        self.line_of(self.inner.span().start)
+    }
+    /// For a given byte number, returns the line and the line number it lies in.
+    fn line_of(&self, n: usize) -> (&str, Position) {
+        let line_start = self.bytes[..n]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line_end = self.bytes[n..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| i + n)
+            .unwrap_or(self.bytes.len());
+        let col_no = n - line_start + 1;
+        let line_no = self.bytes[..line_start]
+            .iter()
+            .filter(|b| **b == b'\n')
+            .count()
+            + 1;
+        (
+            from_utf8(&self.bytes[line_start..line_end]).unwrap(),
+            Position {
+                col_no,
+                line_no,
+                path: self.filename.clone(),
+            }
+        )
     }
 }

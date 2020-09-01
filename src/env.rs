@@ -22,6 +22,7 @@ pub struct Env {
     // Map from identifiers to their values and types
     pub types: HashMap<String, ExprEnvEntry>,
     next_symbol: u64,
+    pub sc_depth: usize,
 }
 
 impl Default for Env {
@@ -29,6 +30,7 @@ impl Default for Env {
         Self {
             types: Default::default(),
             next_symbol: 0,
+            sc_depth: 0,
         }
     }
 }
@@ -152,16 +154,18 @@ pub struct Consts {
     pub nat: Rc<Expr>,
     pub rat: Rc<Expr>,
     pub bot: Rc<Expr>,
+    pub trace_sc: bool,
 }
 
-impl Default for Consts {
-    fn default() -> Self {
+impl Consts {
+    pub fn new(trace_sc: bool) -> Self {
         Self {
             type_: Rc::new(Expr::Type),
             kind: Rc::new(Expr::Kind),
             nat: Rc::new(Expr::NatTy),
             rat: Rc::new(Expr::RatTy),
             bot: Rc::new(Expr::Bot),
+            trace_sc,
         }
     }
 }

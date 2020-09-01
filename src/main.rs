@@ -1,11 +1,13 @@
 #![feature(move_ref_pattern)]
 
-use logos::Logos;
+use rlimit::{Resource, RLIM_INFINITY};
+use structopt::StructOpt;
+use yansi::Paint;
+
 use std::cell::RefCell;
-use std::convert::From;
 use std::default::Default;
-use std::env::args;
 use std::fs::read;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 mod code;
@@ -24,6 +26,44 @@ fn consume_new_ref(ts: &mut Lexer) -> Result<Rc<Ref>, LfscError> {
     Ok(Rc::new(Ref::new(ts.consume_ident()?.to_owned())))
 }
 
+fn check_ann_lambda(
+    ts: &mut Lexer,
+    e: &mut Env,
+    cs: &Consts,
+    create: bool,
+) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
+    let var = consume_new_ref(ts)?;
+    let (domain, _) = check_create(ts, e, cs, Some(&cs.type_))?;
+    let old_binding = e.bind(
+        var.name.clone(),
+        Rc::new(Expr::Ref(var.clone())),
+        domain.clone(),
+    );
+    let (range, range_ty) = check(ts, e, cs, None, create)?;
+    ts.consume_tok(Token::Close)?;
+    e.unbind(old_binding);
+    // TODO: assert that var is not bound in range_ty.
+    Ok((
+        if create {
+            // If there is only one reference to var now, then it must be free in the range.
+            Some(Rc::new(Expr::Pi {
+                var: var.clone(),
+                dom: domain.clone(),
+                rng: range.unwrap(),
+                dependent: false,
+            }))
+        } else {
+            None
+        },
+        Rc::new(Expr::Pi {
+            var,
+            dom: domain,
+            rng: range_ty,
+            dependent: false,
+        }),
+    ))
+}
+
 fn check_pi(
     ts: &mut Lexer,
     e: &mut Env,
@@ -32,7 +72,11 @@ fn check_pi(
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
     let var = consume_new_ref(ts)?;
     let (domain, _) = check_create(ts, e, cs, Some(&cs.type_))?;
-    let old_binding = e.bind(var.name.clone(), Rc::new(Expr::Ref(var.clone())), domain.clone());
+    let old_binding = e.bind(
+        var.name.clone(),
+        Rc::new(Expr::Ref(var.clone())),
+        domain.clone(),
+    );
     let (range, range_ty) = check(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(old_binding);
@@ -189,6 +233,7 @@ fn check(
         }),
         Open => match ts.require_next()? {
             Bang => check_pi(ts, e, cs, create),
+            Pound => check_ann_lambda(ts, e, cs, create),
             At => check_let(ts, e, cs, create),
             Colon => check_ascription(ts, e, cs, create),
             Percent => check_big_lambda(ts, e, cs, create),
@@ -360,15 +405,50 @@ fn do_cmds(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     Ok(())
 }
 
+#[derive(StructOpt, Debug)]
+#[structopt(name = "rlfsc")]
+struct Args {
+    /// Trace side condition executions
+    #[structopt(short = "t", long)]
+    trace_sc: bool,
+
+    /// Files to type-check, in order.
+    #[structopt(name = "FILE", parse(from_os_str))]
+    files: Vec<PathBuf>,
+}
+
 fn main() -> Result<(), LfscError> {
-    let path = args().nth(1).unwrap();
-    let bytes = read(&path).unwrap();
-    let mut lexer = Lexer::from(Token::lexer(&bytes));
+    Resource::STACK
+        .set(1 << 30, RLIM_INFINITY)
+        .expect("Could not set stack size to 1GB");
+    let args = Args::from_args();
     let mut env = Env::default();
-    let consts = Consts::default();
-    //    do_cmds(&mut lexer, &mut env)?;
-    if let Err(e) = do_cmds(&mut lexer, &mut env, &consts) {
-        println!("Error {}", e);
+    for path in &args.files {
+        let bytes = read(path).unwrap();
+        let mut lexer = Lexer::new(&bytes, path.clone());
+        let consts = Consts::new(args.trace_sc);
+        //    do_cmds(&mut lexer, &mut env)?;
+        if let Err(e) = do_cmds(&mut lexer, &mut env, &consts) {
+            let (line, pos) = lexer.current_line();
+            println!(
+                "{} near {}:{}:{}",
+                Paint::red("error"),
+                Paint::blue(pos.path.to_str().unwrap()),
+                pos.line_no,
+                pos.col_no
+            );
+            println!();
+            let line_no_str = format!("{} {} ", Paint::blue(pos.line_no), Paint::blue("|"));
+            println!("{} {}", line_no_str, line);
+            for _ in 0..(pos.col_no + format!("{}   ", pos.line_no).len()) {
+                print!(" ");
+            }
+            println!("^");
+            println!();
+            println!("Message: {}", Paint::red(e));
+            std::process::exit(1);
+        }
     }
+    println!("{}", Paint::green("Proof checked!"));
     Ok(())
 }

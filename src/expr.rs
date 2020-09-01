@@ -37,9 +37,9 @@ impl Ref {
 impl Display for Ref {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
         write!(f, "{}", self.name)?;
-        if let Some(r) = self.val.borrow().as_ref() {
-            write!(f, " (bound to {})", r)?;
-        }
+        //if let Some(r) = self.val.borrow().as_ref() {
+        //    write!(f, " (bound to {})", r)?;
+        //}
         Ok(())
     }
 }
@@ -81,17 +81,17 @@ impl Display for Expr {
             NatLit(u) => write!(f, "{}", u),
             RatLit(r) => write!(f, "{}/{}", r.numer(), r.denom()),
             Ref(s) => write!(f, "{}", s),
-            DeclaredSymbol(id, s, marks) => {
-                write!(f, "{}{{{}}}", s, id)?;
-                if marks.get() != 0 {
-                    f.debug_list()
-                        .entries(
-                            (0..31)
-                                .filter(|i| (1u32 << i) & marks.get() != 0)
-                                .map(|i| i + 1),
-                        )
-                        .finish()?;
-                }
+            DeclaredSymbol(_id, s, _marks) => {
+                write!(f, "{}", s)?;
+                //if marks.get() != 0 {
+                //    f.debug_list()
+                //        .entries(
+                //            (0..31)
+                //                .filter(|i| (1u32 << i) & marks.get() != 0)
+                //                .map(|i| i + 1),
+                //        )
+                //        .finish()?;
+                //}
                 Ok(())
             }
             Run(c, n, e) => write!(f, "(^ ({} {}) {})", c, n, e),
@@ -279,12 +279,57 @@ impl Expr {
         }
     }
 
+    pub fn weak_head_reduce(a: Rc<Expr>) -> Rc<Expr> {
+        fn get_head(a: Rc<Expr>) -> Rc<Expr> {
+            let d = Expr::deref(a);
+            match d.as_ref() {
+                Expr::App(ref head, _) => get_head(head.clone()),
+                _ => d,
+            }
+        }
+        fn collect_args(a: Rc<Expr>) -> Vec<Rc<Expr>> {
+            let d = Expr::deref(a);
+            match d.as_ref() {
+                Expr::App(ref head, ref args) => {
+                    let mut a = collect_args(head.clone());
+                    a.extend(args.iter().cloned());
+                    a
+                }
+                _ => Vec::new(),
+            }
+        }
+        let mut head = get_head(a.clone());
+        match head.as_ref() {
+            Expr::Pi { .. } => {
+                let mut args = collect_args(a);
+                args.reverse();
+                while let Expr::Pi {
+                    ref var, ref rng, ..
+                } = head.as_ref()
+                {
+                    if let Some(a) = args.pop() {
+                        head = Expr::sub(rng, &var.name, &a);
+                    } else {
+                        break;
+                    }
+                }
+                if args.len() > 0 {
+                    args.reverse();
+                    Rc::new(Expr::App(head, args))
+                } else {
+                    head
+                }
+            }
+            _ => a,
+        }
+    }
+
     pub fn unify_test(a: &Rc<Expr>, b: &Rc<Expr>) -> bool {
         if Rc::ptr_eq(&a, &b) {
             true
         } else {
-            let aa = Expr::deref(a.clone());
-            let bb = Expr::deref(b.clone());
+            let aa = Expr::weak_head_reduce(Expr::deref(a.clone()));
+            let bb = Expr::weak_head_reduce(Expr::deref(b.clone()));
             if aa == bb {
                 true
             } else {
