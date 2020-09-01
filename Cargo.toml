@@ -11,6 +11,9 @@ license = "MIT OR Apache-2.0"
 keywords = ["type-checker", "proof-checker", "dependent-types", "LFSC", "SMT"]
 categories = ["command-line-utilities", "mathematics"]
 readme = "README.md"
+exclude = [
+    "benches",
+]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
