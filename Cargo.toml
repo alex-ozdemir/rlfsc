@@ -3,6 +3,14 @@ name = "rlfsc"
 version = "0.1.0"
 authors = ["Alex Ozdemir <aozdemir@hmc.edu>"]
 edition = "2018"
+description = "A checker for the LFSC proof language"
+homepage = "https://github.com/alex-ozdemir/rlfsc"
+repository = "https://github.com/alex-ozdemir/rlfsc"
+documentation = "https://github.com/alex-ozdemir/rlfsc"
+license = "MIT OR Apache-2.0"
+keywords = ["type-checker", "proof-checker", "dependent-types", "LFSC", "SMT"]
+categories = ["command-line-utilities", "mathematics"]
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

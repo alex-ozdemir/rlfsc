@@ -1,9 +1,12 @@
 # Rust implementation of LFSC
 
-## Run Instructions
+## Installation Instructions
 
-* Increase the stack size: `ulimit -s $(( 2 ** 20))`
-* `cargo run [--release] pf`.
+1. Install the (nightly) Rust toolchain using [Rustup](https://rustup.rs/).
+   * Be sure to add Cargo's bin directory to your path
+      * i.e. by adding `export PATH="$HOME/.cargo/bin/:$PATH"` to your rc
+         file.
+2. Run `cargo install rlfsc`
 
 ## Possible improvements over the original LFSC
 
@@ -12,7 +15,6 @@
    * It's implemented using the `logos` library.
 * Automatically reference-counted expressions using `std::rc::Rc`.
 * No gotos/crazy stuff
-
 
 ## State of Affairs
 
