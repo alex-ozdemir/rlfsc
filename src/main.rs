@@ -153,6 +153,7 @@ fn check_app(
     let fun = b.val.clone();
     let mut ty = b.ty.clone();
     let mut args = Vec::new();
+    let mut nargs = 0;
 
     while Some(Token::Close) != ts.peek() || ty.is_pi_run() {
         match &*ty {
@@ -183,8 +184,9 @@ fn check_app(
                     }
                 }
             }
-            _ => return Err(LfscError::UntypableApplication((*ty).clone())),
+            _ => return Err(LfscError::TooManyArgs(name, nargs, (*ty).clone())),
         }
+        nargs += 1;
     }
     ts.consume_tok(Token::Close)?;
     Ok((
