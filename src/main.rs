@@ -417,10 +417,27 @@ struct Args {
     files: Vec<PathBuf>,
 }
 
-fn main() -> Result<(), LfscError> {
+fn try_increase_stack() {
+    let hard_limit = Resource::STACK
+        .get()
+        .expect("Could not fetch stack limit")
+        .1;
+    let desired_limit = 1 << 30;
+    let actual_setting = if hard_limit == RLIM_INFINITY || hard_limit >= desired_limit {
+        desired_limit
+    } else {
+        hard_limit
+    };
+    if actual_setting < desired_limit {
+        eprintln!("Warning: could not increase stack size to {} bytes because of the hard limit. Setting it to {} instead", desired_limit, actual_setting);
+    }
     Resource::STACK
-        .set(1 << 30, RLIM_INFINITY)
-        .expect("Could not set stack size to 1GB");
+        .set(actual_setting, hard_limit)
+        .expect("Could not set stack size")
+}
+
+fn main() -> Result<(), LfscError> {
+    try_increase_stack();
     let args = Args::from_args();
     let mut env = Env::default();
     for path in &args.files {
