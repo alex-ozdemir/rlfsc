@@ -199,6 +199,57 @@ fn check_app(
     ))
 }
 
+fn check_run(
+    ts: &mut Lexer,
+    e: &mut Env,
+    cs: &Consts,
+) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
+    ts.consume_tok(Token::Open)?;
+    let pgm_id = ts.consume_ident()?;
+    let entry = e.binding(pgm_id)?;
+    let mut ty = entry.ty.clone();
+    let fun = entry.val.clone();
+    let mut nargs = 0;
+    let mut args = Vec::new();
+    while Some(Token::Close) != ts.peek() {
+        match &*ty {
+            &Expr::Pi {
+                ref dom,
+                ref rng,
+                ref var,
+                ref dependent,
+            } => {
+                let arg = check_create(ts, e, cs, Some(dom))?.0;
+                ty = if *dependent {
+                    Expr::sub(rng, &var.name, &arg)
+                } else {
+                    rng.clone()
+                };
+                args.push(arg);
+            }
+            _ => {
+                return Err(LfscError::TooManyArgs(
+                    pgm_id.to_owned(),
+                    nargs,
+                    (*ty).clone(),
+                ))
+            }
+        }
+        nargs += 1;
+    }
+    ts.consume_tok(Token::Close)?; // Close app
+    let run_res = check_create(ts, e, cs, Some(&ty))?.0;
+    ts.consume_tok(Token::Close)?; // Close run
+    Ok((
+        Some(Rc::new(Expr::Run(
+            Code::App(fun, args.into_iter().map(Code::Expr).collect()),
+            run_res,
+            ty,
+        ))),
+        Rc::new(Expr::Type),
+    ))
+}
+
 fn check_create(
     ts: &mut Lexer,
     e: &mut Env,
@@ -278,17 +329,7 @@ fn check(
                 t => Err(LfscError::InvalidLambdaType(t.clone())),
             },
             Ident => check_app(ts, e, cs, ts.string(), create),
-            Caret => {
-                let run_expr = parse_term(ts, e, cs)?;
-                let ty = type_code(&run_expr, e, cs)?;
-                let run_res = check_create(ts, e, cs, Some(&ty))?.0;
-                //let run_res = consume_var(ts)?;
-                ts.consume_tok(Close)?;
-                Ok((
-                    Some(Rc::new(Expr::Run(run_expr, run_res, ty))),
-                    Rc::new(Expr::Type),
-                ))
-            }
+            Caret => check_run(ts, e, cs),
             t => Err(LfscError::UnexpectedToken("a typeable term", t)),
         },
         t => Err(LfscError::UnexpectedToken("a typeable term", t)),
