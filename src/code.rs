@@ -9,6 +9,7 @@ use rug::{Integer, Rational};
 use crate::env::{Consts, Env};
 use crate::error::LfscError;
 use crate::expr::{Expr, Ref};
+use crate::expr_check::{check_expr};
 use crate::token::{Lexer, Token};
 
 macro_rules! try_ {
@@ -617,7 +618,7 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
             e.unify(&tr_ty, &fa_ty)
         }
         Code::App(ref fun, ref args) => {
-            let mut ty = e.ty(&fun.name()?)?.clone();
+            let mut ty = check_expr(fun, e, cs)?;
             let arg_tys: Vec<_> = args
                 .into_iter()
                 .map(|a| type_code(a, e, cs))
@@ -650,11 +651,12 @@ pub fn type_code(t: &Code, e: &mut Env, cs: &Consts) -> Result<Rc<Expr>, LfscErr
                     match pat {
                         Pattern::Default => type_code(val, e, cs),
                         Pattern::Const(ref n) => {
-                            e.unify(e.ty(n.name()?)?, &disc_ty)?;
+                            let n_ty = check_expr(n, e, cs)?;
+                            e.unify(&n_ty, &disc_ty)?;
                             type_code(val, e, cs)
                         }
                         Pattern::App(ref n, ref vars) => {
-                            let mut ty = e.ty(n.name()?)?.clone();
+                            let mut ty = check_expr(n, e, cs)?;
                             let mut unbinds = Vec::new();
                             for v in vars {
                                 if let Expr::Pi {

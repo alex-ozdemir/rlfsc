@@ -91,7 +91,6 @@ impl Env {
         Expr::DeclaredSymbol(self.next_symbol - 1, s, Cell::new(0))
     }
     pub fn unify(&self, a: &Rc<Expr>, b: &Rc<Expr>) -> Result<Rc<Expr>, LfscError> {
-        //println!("unify {} {}", a, b);
         if Rc::ptr_eq(&a, &b) {
             Ok(a.clone())
         } else {

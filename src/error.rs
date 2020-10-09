@@ -20,7 +20,9 @@ pub enum LfscError {
     #[error("A lambda's type cannot be computed. It must be ascribed.")]
     UnascribedLambda,
     #[error("After applying `{0}` to {1} arguments, its type is `{2}` which cannot be applied to any more. Yet it is given another argument!")]
-    TooManyArgs(String, usize, Expr),
+    TooManyArgs(Expr, usize, Expr),
+    #[error("After applying `{0}` to {1} arguments, its type is `{2}` which cannot be applied to any more. Yet it is given another argument!")]
+    TooManyArgsToIdent(String, usize, Expr),
     #[error("Terms of type `{0}` cannot be applied")]
     UntypableApplication(Expr),
     #[error("`{0}` has type\n\t{1}\n, but was expected to have\n\t{2}")]
@@ -73,5 +75,7 @@ pub enum LfscError {
     EmptyDo,
     #[error("No cases in a match form")]
     EmptyMatch,
+    #[error("Cannot type kind")]
+    CannotTypeKind,
 }
 
