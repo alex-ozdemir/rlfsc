@@ -12,6 +12,8 @@ pub enum Token {
     // Commands
     #[token(b"declare")]
     Declare,
+    #[token(b"opaque")]
+    Opaque,
     #[token(b"define")]
     Define,
     #[token(b"check")]
@@ -90,7 +92,7 @@ pub enum Token {
     #[regex(br"[0-9]*/[0-9*]")]
     Rational,
 
-    #[regex(br"[^%!@:~\\^()0-9 \t\n\f][^() \t\n\f]*")]
+    #[regex(br"[^%!@:~\\^()0-9 \t\n\f][^() \t\n\f;]*")]
     Ident,
 
     // Logos requires one token variant to handle errors,

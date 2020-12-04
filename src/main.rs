@@ -21,7 +21,7 @@ use expr_check::{check, check_create, check_program};
 use token::{Lexer, Token, LogosLexer};
 
 fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
-    use Token::{Check, Declare, Define, Program};
+    use Token::{Check, Declare, Define, Program, Opaque};
     match ts.require_next()? {
         Declare => {
             let name = ts.consume_ident()?.to_owned();
@@ -40,6 +40,12 @@ fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), 
             let name = ts.consume_ident()?.to_owned();
             let (val, ty) = check_create(ts, e, cs, None)?;
             e.bind(name.clone(), val, ty);
+        }
+        Opaque => {
+            let name = ts.consume_ident()?.to_owned();
+            let (_, ty) = check(ts, e, cs, None, false)?;
+            let sym = Rc::new(e.new_symbol(name.clone()));
+            e.bind(name.clone(), sym, ty);
         }
         Program => {
             // It binds the program internally
