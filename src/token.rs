@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::str::from_utf8;
@@ -91,6 +92,24 @@ pub enum Token {
 
     #[regex(br"[0-9]*/[0-9*]")]
     Rational,
+
+    // Extension tokens
+    #[token(b"id")]
+    Id,
+    #[token(b"->")]
+    Arrow,
+    #[token(b"Forall")]
+    Forall,
+    #[token(b"declare-rule")]
+    DeclareRule,
+    #[token(b"declare-type")]
+    DeclareType,
+    #[token(b"provided")]
+    Provided,
+    #[token(b"has-proof")]
+    HasProof,
+    #[token(b"assuming")]
+    Assuming,
 
     #[regex(br"[^%!@:~\\^()0-9 \t\n\f][^() \t\n\f;]*")]
     Ident,
@@ -230,5 +249,89 @@ impl<'a> Lexer<'a> for LogosLexer<'a> {
     }
     fn path(&self) -> &PathBuf {
         &self.filename
+    }
+}
+
+/// # Overview
+///
+/// `DesugaringLexer` implements a streaming macro-expander of shorts.
+///
+/// It performs two kinds of expansions: substitutions and de-variadification.
+///
+/// ## Substitutions
+///
+/// These are simple enough. One token is taken is replaced by another. They are:
+///    * `provided` with `^`
+///    * `has-proof` with `:`
+///    * `assuming` with `%`
+///    * `Forall` with `!`
+///
+/// ## De-variadification
+///
+/// This is a more complex process. The idea is to replace certain variadic forms with non-variadic
+/// forms. Each variadic form is indicated with a head keyword. The keywords are
+///    * `->`
+///    * `declare-rule`
+///    * `declare-type`
+///
+/// The first is a *term* form. The latter two are *command* forms.
+///
+/// Let's give examples of the use of each, and their expansions:
+///
+///    * `(-> (a (id i b)) (k a i))` to `(! _ a (! i b (k a i)))`
+///    * `(declare-rule and_pf ((id a bool) (id b bool) (holds a) (holds b)) (holds (and a b)))` to 
+///      `(declare and_pf (! a bool (! b bool (! _ (holds a ) (! _ (holds b) (holds (and a b)))))))`.
+///
+/// (_ denotes an arbitrary name)
+///
+pub struct DesugaringLexer<'a> {
+    inner: LogosLexer<'a>,
+    out: VecDeque<(Token, &'a[u8], Range<usize>)>,
+}
+
+impl<'a> DesugaringLexer<'a> {
+    fn pull(&mut self) {
+        if self.out.len() == 0 {
+            self.inner.peek().map(|t| {
+                // Implement token substitutions
+                let subbed_t = match t {
+                    Token::Provided => Token::Caret,
+                    Token::Assuming => Token::Percent,
+                    Token::Forall => Token::Bang,
+                    Token::HasProof => Token::Colon,
+                    t => t,
+                };
+                self.out.push_back((subbed_t, self.inner.slice(), self.inner.span()));
+                self.inner.next();
+            });
+        }
+    }
+}
+
+impl<'a> Lexer<'a> for DesugaringLexer<'a> {
+    fn new(bytes: &'a [u8], filename: PathBuf) -> Self {
+        let inner = LogosLexer::new(bytes, filename);
+        DesugaringLexer { inner, out: VecDeque::new() }
+    }
+    fn next(&mut self) -> Option<Token> {
+        self.pull();
+        let t = self.out.pop_front().map(|(a, _, _)| a);
+        self.pull();
+        t
+    }
+    fn peek(&self) -> Option<Token> {
+        self.out.front().map(|(a, _, _)| a.clone())
+    }
+    fn slice(&self) -> &'a [u8] {
+        self.out.front().map(|(_, a, _)| a.clone()).unwrap_or(&b""[..])
+    }
+    fn span(&self) -> Range<usize> {
+        self.out.front().map(|(_, _, a)| a.clone()).expect("Missing range")
+    }
+    fn bytes(&self) -> &'a [u8] {
+        self.inner.bytes()
+    }
+    fn path(&self) -> &PathBuf {
+        self.inner.path()
     }
 }

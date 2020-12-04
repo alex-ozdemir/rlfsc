@@ -18,7 +18,7 @@ use env::{Consts, Env};
 use error::LfscError;
 use expr::Expr;
 use expr_check::{check, check_create, check_program};
-use token::{Lexer, Token, LogosLexer};
+use token::{Lexer, Token, LogosLexer, DesugaringLexer};
 
 fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     use Token::{Check, Declare, Define, Program, Opaque};
@@ -107,7 +107,7 @@ fn main() -> Result<(), LfscError> {
     let mut env = Env::default();
     for path in &args.files {
         let bytes = read(path).unwrap();
-        let mut lexer = LogosLexer::new(&bytes, path.clone());
+        let mut lexer = DesugaringLexer::new(&bytes, path.clone());
         let consts = Consts::new(args.trace_sc);
         //    do_cmds(&mut lexer, &mut env)?;
         if let Err(e) = do_cmds(&mut lexer, &mut env, &consts) {

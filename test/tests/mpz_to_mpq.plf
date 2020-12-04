@@ -19,7 +19,7 @@
 (program mp_z_to_mpq ((z mpz)) mpz
          z)
 
-(program id ((z mpz)) mpz
+(program id_fn ((z mpz)) mpz
          (mpz_to_mpqq
            (mp_to_mpq
              (mpz_to_mp

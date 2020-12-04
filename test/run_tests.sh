@@ -37,6 +37,10 @@ tests=(
   use-bool.plf
   use-use-bool.plf
   whr-match.plf
+  sugar_provided.plf
+  sugar_assuming.plf
+  sugar_forall.plf
+  sugar_has_proof.plf
   )
 
 cargo build
