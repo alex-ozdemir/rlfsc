@@ -7,12 +7,12 @@ use crate::error::LfscError;
 use crate::expr::{Expr, Program, Ref};
 use crate::token::{Lexer, Token};
 
-fn consume_new_ref(ts: &mut Lexer) -> Result<Rc<Ref>, LfscError> {
+fn consume_new_ref<'a, L: Lexer<'a>>(ts: &mut L) -> Result<Rc<Ref>, LfscError> {
     Ok(Rc::new(Ref::new(ts.consume_ident()?.to_owned())))
 }
 
-fn check_ann_lambda(
-    ts: &mut Lexer,
+fn check_ann_lambda<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     create: bool,
@@ -49,8 +49,8 @@ fn check_ann_lambda(
     ))
 }
 
-fn check_pi(
-    ts: &mut Lexer,
+fn check_pi<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     create: bool,
@@ -86,8 +86,8 @@ fn check_pi(
     }
 }
 
-fn check_let(
-    ts: &mut Lexer,
+fn check_let<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     create: bool,
@@ -101,8 +101,8 @@ fn check_let(
     Ok((v, t))
 }
 
-fn check_ascription(
-    ts: &mut Lexer,
+fn check_ascription<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     create: bool,
@@ -113,8 +113,8 @@ fn check_ascription(
     Ok((t, ty))
 }
 
-fn check_big_lambda(
-    ts: &mut Lexer,
+fn check_big_lambda<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     create: bool,
@@ -129,8 +129,8 @@ fn check_big_lambda(
     Ok((v, t))
 }
 
-fn check_app(
-    ts: &mut Lexer,
+fn check_app<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     name: String,
@@ -186,8 +186,8 @@ fn check_app(
     ))
 }
 
-pub fn check_create(
-    ts: &mut Lexer,
+pub fn check_create<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     ex_ty: Option<&Rc<Expr>>,
@@ -195,8 +195,8 @@ pub fn check_create(
     check(ts, e, cs, ex_ty, true).map(|(a, b)| (a.unwrap(), b))
 }
 
-pub fn check(
-    ts: &mut Lexer,
+pub fn check<'a, L: Lexer<'a>>(
+    ts: &mut L,
     e: &mut Env,
     cs: &Consts,
     ex_ty: Option<&Rc<Expr>>,
@@ -286,7 +286,11 @@ pub fn check(
     }
 }
 
-pub fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
+pub fn check_program<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+) -> Result<(), LfscError> {
     let name = ts.consume_ident()?.to_owned();
     ts.consume_tok(Token::Open)?;
     let mut args = Vec::new();
@@ -341,7 +345,11 @@ pub fn check_program(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), Lfs
     Ok(())
 }
 
-fn check_arg(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Rc<Ref>, Rc<Expr>), LfscError> {
+fn check_arg<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+) -> Result<(Rc<Ref>, Rc<Expr>), LfscError> {
     let name = consume_new_ref(ts)?;
     let ty = check_create(ts, e, cs, Some(&cs.type_))?.0;
     ts.consume_tok(Token::Close)?;
@@ -414,11 +422,11 @@ pub fn check_expr(expr: &Rc<Expr>, env: &mut Env, cs: &Consts) -> Result<Rc<Expr
             let rng2 = check_expr(rng, env, cs)?;
             *var.val.borrow_mut() = None;
             Ok(Rc::new(Expr::Pi {
-            dom: dom.clone(),
-            var: var.clone(),
-            dependent: dependent.clone(),
-            rng: rng2,
-        }))
+                dom: dom.clone(),
+                var: var.clone(),
+                dependent: dependent.clone(),
+                rng: rng2,
+            }))
         }
     }?;
     Ok(r)

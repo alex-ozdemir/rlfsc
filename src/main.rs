@@ -18,9 +18,9 @@ use env::{Consts, Env};
 use error::LfscError;
 use expr::Expr;
 use expr_check::{check, check_create, check_program};
-use token::{Lexer, Token};
+use token::{Lexer, Token, LogosLexer};
 
-fn do_cmd(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
+fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     use Token::{Check, Declare, Define, Program};
     match ts.require_next()? {
         Declare => {
@@ -54,7 +54,7 @@ fn do_cmd(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     Ok(())
 }
 
-fn do_cmds(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
+fn do_cmds<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
     while let Some(t) = ts.next() {
         match t {
             Token::Open => do_cmd(ts, e, cs)?,
@@ -101,7 +101,7 @@ fn main() -> Result<(), LfscError> {
     let mut env = Env::default();
     for path in &args.files {
         let bytes = read(path).unwrap();
-        let mut lexer = Lexer::new(&bytes, path.clone());
+        let mut lexer = LogosLexer::new(&bytes, path.clone());
         let consts = Consts::new(args.trace_sc);
         //    do_cmds(&mut lexer, &mut env)?;
         if let Err(e) = do_cmds(&mut lexer, &mut env, &consts) {

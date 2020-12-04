@@ -9,7 +9,7 @@ use rug::{Integer, Rational};
 use crate::env::{Consts, Env};
 use crate::error::LfscError;
 use crate::expr::{Expr, Ref};
-use crate::expr_check::{check_expr};
+use crate::expr_check::check_expr;
 use crate::token::{Lexer, Token};
 
 macro_rules! try_ {
@@ -124,7 +124,7 @@ impl Code {
     }
 }
 
-fn consume_new_binding(ts: &mut Lexer) -> Result<Binding, LfscError> {
+fn consume_new_binding<'a, L: Lexer<'a>>(ts: &mut L) -> Result<Binding, LfscError> {
     match ts.require_next()? {
         Token::Hole => Ok(Binding::Hole),
         Token::Ident => Ok(Binding::Var(Rc::new(Ref::new(ts.str().to_owned())))),
@@ -132,11 +132,15 @@ fn consume_new_binding(ts: &mut Lexer) -> Result<Binding, LfscError> {
     }
 }
 
-fn consume_new_ref(ts: &mut Lexer) -> Result<Rc<Ref>, LfscError> {
+fn consume_new_ref<'a, L: Lexer<'a>>(ts: &mut L) -> Result<Rc<Ref>, LfscError> {
     Ok(Rc::new(Ref::new(try_!(ts.consume_ident()).to_owned())))
 }
 
-pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, LfscError> {
+pub fn parse_term<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+) -> Result<Code, LfscError> {
     use Token::*;
     match ts.require_next()? {
         Ident => Ok(Code::Expr(e.expr_value(ts.str())?.clone())),
@@ -239,7 +243,11 @@ pub fn parse_term(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<Code, Lfsc
     }
 }
 
-fn parse_case(ts: &mut Lexer, e: &mut Env, cs: &Consts) -> Result<(Pattern, Code), LfscError> {
+fn parse_case<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+) -> Result<(Pattern, Code), LfscError> {
     ts.consume_tok(Token::Open)?;
     let r = match ts.require_next()? {
         Token::Open => {

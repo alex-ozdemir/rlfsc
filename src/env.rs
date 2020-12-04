@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::error::LfscError;
-use crate::expr::{Expr};
+use crate::expr::Expr;
 
 impl From<ExprEnvEntry> for (Rc<Expr>, Rc<Expr>) {
     fn from(e: ExprEnvEntry) -> Self {

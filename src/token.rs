@@ -1,9 +1,10 @@
-use logos::{self, Logos};
-use std::str::from_utf8;
+use std::ops::Range;
 use std::path::PathBuf;
+use std::str::from_utf8;
 
 use crate::error::LfscError;
 
+use logos::{self, Logos};
 use rug::{Integer, Rational};
 
 #[derive(Logos, Debug, PartialEq, Clone, Copy)]
@@ -104,8 +105,80 @@ pub enum Token {
     TokenErr,
 }
 
+pub trait Lexer<'a> {
+    fn new(bytes: &'a [u8], path: PathBuf) -> Self;
+    fn next(&mut self) -> Option<Token>;
+    fn peek(&self) -> Option<Token>;
+    fn slice(&self) -> &'a [u8];
+    fn span(&self) -> Range<usize>;
+    fn path(&self) -> &PathBuf;
+    fn bytes(&self) -> &'a [u8];
+
+    fn require_next(&mut self) -> Result<Token, LfscError> {
+        self.next().ok_or(LfscError::UnexpectedEof)
+    }
+    fn str(&self) -> &'a str {
+        from_utf8(self.slice()).unwrap()
+    }
+    fn string(&self) -> String {
+        self.str().to_owned()
+    }
+    fn nat(&self) -> Integer {
+        Integer::from_str_radix(self.str(), 10).unwrap()
+    }
+    fn rat(&self) -> Rational {
+        Rational::from_str_radix(self.str(), 10).unwrap()
+    }
+    fn consume_tok(&mut self, t: Token) -> Result<(), LfscError> {
+        let f = self.require_next()?;
+        if &f == &t {
+            Ok(())
+        } else {
+            Err(LfscError::WrongToken(t, f))
+        }
+    }
+    fn consume_ident(&mut self) -> Result<&'a str, LfscError> {
+        let t = self.require_next()?;
+        if let Token::Ident = t {
+            Ok(self.str())
+        } else {
+            Err(LfscError::WrongToken(Token::Ident, t))
+        }
+    }
+    fn current_line(&self) -> (&'a str, Position) {
+        self.line_of(self.span().start)
+    }
+    /// For a given byte number, returns the line and the line number it lies in.
+    fn line_of(&self, n: usize) -> (&'a str, Position) {
+        let line_start = self.bytes()[..n]
+            .iter()
+            .rposition(|b| *b == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let line_end = self.bytes()[n..]
+            .iter()
+            .position(|b| *b == b'\n')
+            .map(|i| i + n)
+            .unwrap_or(self.bytes().len());
+        let col_no = n - line_start + 1;
+        let line_no = self.bytes()[..line_start]
+            .iter()
+            .filter(|b| **b == b'\n')
+            .count()
+            + 1;
+        (
+            from_utf8(&self.bytes()[line_start..line_end]).unwrap(),
+            Position {
+                col_no,
+                line_no,
+                path: self.path().clone(),
+            },
+        )
+    }
+}
+
 /// A peekable lexer
-pub struct Lexer<'a> {
+pub struct LogosLexer<'a> {
     inner: logos::Lexer<'a, Token>,
     bytes: &'a [u8],
     peek: Option<Token>,
@@ -120,8 +193,8 @@ pub struct Position {
     pub path: PathBuf,
 }
 
-impl<'a> Lexer<'a> {
-    pub fn new(bytes: &'a [u8], filename: PathBuf) -> Self {
+impl<'a> Lexer<'a> for LogosLexer<'a> {
+    fn new(bytes: &'a [u8], filename: PathBuf) -> Self {
         let mut inner = Token::lexer(bytes);
         Self {
             peek: inner.next(),
@@ -131,7 +204,7 @@ impl<'a> Lexer<'a> {
             filename,
         }
     }
-    pub fn next(&mut self) -> Option<Token> {
+    fn next(&mut self) -> Option<Token> {
         self.peek_slice = self.inner.slice();
         let n = std::mem::replace(&mut self.peek, self.inner.next());
         //println!(
@@ -141,71 +214,19 @@ impl<'a> Lexer<'a> {
         //);
         n
     }
-    pub fn require_next(&mut self) -> Result<Token, LfscError> {
-        self.next().ok_or(LfscError::UnexpectedEof)
-    }
-    pub fn peek(&self) -> Option<Token> {
+    fn peek(&self) -> Option<Token> {
         self.peek
     }
-    pub fn slice(&self) -> &'a [u8] {
+    fn slice(&self) -> &'a [u8] {
         self.peek_slice
     }
-    pub fn str(&self) -> &'a str {
-        from_utf8(self.slice()).unwrap()
+    fn span(&self) -> Range<usize> {
+        self.inner.span()
     }
-    pub fn string(&self) -> String {
-        self.str().to_owned()
+    fn bytes(&self) -> &'a [u8] {
+        self.bytes
     }
-    pub fn nat(&self) -> Integer {
-        Integer::from_str_radix(self.str(), 10).unwrap()
-    }
-    pub fn rat(&self) -> Rational {
-        Rational::from_str_radix(self.str(), 10).unwrap()
-    }
-    pub fn consume_tok(&mut self, t: Token) -> Result<(), LfscError> {
-        let f = self.require_next()?;
-        if &f == &t {
-            Ok(())
-        } else {
-            Err(LfscError::WrongToken(t, f))
-        }
-    }
-    pub fn consume_ident(&mut self) -> Result<&'a str, LfscError> {
-        let t = self.require_next()?;
-        if let Token::Ident = t {
-            Ok(self.str())
-        } else {
-            Err(LfscError::WrongToken(Token::Ident, t))
-        }
-    }
-    pub fn current_line(&self) -> (&str, Position) {
-        self.line_of(self.inner.span().start)
-    }
-    /// For a given byte number, returns the line and the line number it lies in.
-    fn line_of(&self, n: usize) -> (&str, Position) {
-        let line_start = self.bytes[..n]
-            .iter()
-            .rposition(|b| *b == b'\n')
-            .map(|i| i + 1)
-            .unwrap_or(0);
-        let line_end = self.bytes[n..]
-            .iter()
-            .position(|b| *b == b'\n')
-            .map(|i| i + n)
-            .unwrap_or(self.bytes.len());
-        let col_no = n - line_start + 1;
-        let line_no = self.bytes[..line_start]
-            .iter()
-            .filter(|b| **b == b'\n')
-            .count()
-            + 1;
-        (
-            from_utf8(&self.bytes[line_start..line_end]).unwrap(),
-            Position {
-                col_no,
-                line_no,
-                path: self.filename.clone(),
-            }
-        )
+    fn path(&self) -> &PathBuf {
+        &self.filename
     }
 }

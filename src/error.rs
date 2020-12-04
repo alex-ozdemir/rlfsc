@@ -1,7 +1,6 @@
-
-use crate::expr::Expr;
 use crate::code::{MpBinOp, MpCond, Pattern};
-use crate::token::{Token};
+use crate::expr::Expr;
+use crate::token::Token;
 
 use thiserror::Error;
 
@@ -78,4 +77,3 @@ pub enum LfscError {
     #[error("Cannot type kind")]
     CannotTypeKind,
 }
-
