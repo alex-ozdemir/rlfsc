@@ -14,6 +14,8 @@ pub enum LfscError {
     NoName(Expr),
     #[error("Expect a {0}, but found token `{1:?}`")]
     UnexpectedToken(&'static str, Token),
+    #[error("Got an unexpected closing parenthesis")]
+    UnexpectedClose,
     #[error("A Pi-binding's range must have type 'type' or 'kind', but it has type {0}")]
     InvalidPiRange(Expr),
     #[error("A lambda's type cannot be computed. It must be ascribed.")]
@@ -76,4 +78,6 @@ pub enum LfscError {
     EmptyMatch,
     #[error("Cannot type kind")]
     CannotTypeKind,
+    #[error("Expected a list after {0:?}, but got a single token {1:?}.")]
+    ExpectedList(Token, Token),
 }

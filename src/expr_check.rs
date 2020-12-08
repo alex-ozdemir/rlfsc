@@ -142,7 +142,7 @@ fn check_app<'a, L: Lexer<'a>>(
     let mut args = Vec::new();
     let mut nargs = 0;
 
-    while Some(Token::Close) != ts.peek() || ty.is_pi_run() {
+    while Some(Token::Close) != ts.peek_token() || ty.is_pi_run() {
         match &*ty {
             &Expr::Pi {
                 ref dom,
@@ -203,81 +203,85 @@ pub fn check<'a, L: Lexer<'a>>(
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
     use Token::*;
-    let (ast, ty) = match ts.require_next()? {
+    let t = ts.require_next()?;
+    let (ast, ty) = match t.tok {
         Token::Type => Ok((Some(cs.type_.clone()), cs.kind.clone())),
         Token::Mpz => Ok((Some(cs.nat.clone()), cs.type_.clone())),
         Token::Mpq => Ok((Some(cs.rat.clone()), cs.type_.clone())),
-        Token::Natural => Ok((Some(Rc::new(Expr::NatLit(ts.nat()))), cs.nat.clone())),
-        Token::Rational => Ok((Some(Rc::new(Expr::RatLit(ts.rat()))), cs.rat.clone())),
+        Token::Natural => Ok((Some(Rc::new(Expr::NatLit(t.nat()))), cs.nat.clone())),
+        Token::Rational => Ok((Some(Rc::new(Expr::RatLit(t.rat()))), cs.rat.clone())),
         Token::Hole => Ok((Some(Rc::new(Expr::new_hole())), Rc::new(Expr::new_hole()))),
         Ident => Ok({
-            let res = e.expr_binding(ts.str())?;
+            let res = e.expr_binding(t.str())?;
             if create {
                 (Some(res.val.clone()), res.ty.clone())
             } else {
                 (None, res.ty.clone())
             }
         }),
-        Open => match ts.require_next()? {
-            Bang => check_pi(ts, e, cs, create),
-            Pound => check_ann_lambda(ts, e, cs, create),
-            At => check_let(ts, e, cs, create),
-            Colon => check_ascription(ts, e, cs, create),
-            Percent => check_big_lambda(ts, e, cs, create),
-            Tilde => Ok({
-                let (t, ty) = check(ts, e, cs, None, create)?;
-                ty.require_mp_ty()?;
-                ts.consume_tok(Close)?;
-                if create {
-                    (Some(Rc::new(t.unwrap().mp_neg()?)), ty)
-                } else {
-                    (None, ty)
+        Open => {
+            let t_head = ts.require_next()?;
+            match t_head.tok {
+                Bang => check_pi(ts, e, cs, create),
+                Pound => check_ann_lambda(ts, e, cs, create),
+                At => check_let(ts, e, cs, create),
+                Colon => check_ascription(ts, e, cs, create),
+                Percent => check_big_lambda(ts, e, cs, create),
+                Tilde => Ok({
+                    let (t, ty) = check(ts, e, cs, None, create)?;
+                    ty.require_mp_ty()?;
+                    ts.consume_tok(Close)?;
+                    if create {
+                        (Some(Rc::new(t.unwrap().mp_neg()?)), ty)
+                    } else {
+                        (None, ty)
+                    }
+                }),
+                ReverseSolidus => match ex_ty.ok_or(LfscError::UnascribedLambda)?.as_ref() {
+                    &Expr::Pi {
+                        ref dom,
+                        ref rng,
+                        ref var,
+                        ref dependent,
+                    } => {
+                        let act_var = ts.consume_ident()?.to_owned();
+                        let sym = Rc::new(e.new_symbol(act_var.clone()));
+                        let new_expected = Expr::sub(rng, &var.name, &sym);
+                        let old_binding = e.bind(act_var, sym, dom.clone());
+                        let res = check(ts, e, cs, Some(&new_expected), create)?.0;
+                        ts.consume_tok(Token::Close)?;
+                        e.unbind(old_binding);
+                        return Ok((
+                            if create {
+                                Some(Rc::new(Expr::Pi {
+                                    var: var.clone(),
+                                    dom: dom.clone(),
+                                    rng: res.unwrap(),
+                                    dependent: *dependent,
+                                }))
+                            } else {
+                                None
+                            },
+                            ex_ty.unwrap().clone(),
+                        ));
+                    }
+                    t => Err(LfscError::InvalidLambdaType(t.clone())),
+                },
+                Ident => check_app(ts, e, cs, t_head.string(), create),
+                Caret => {
+                    let run_expr = parse_term(ts, e, cs)?;
+                    let ty = type_code(&run_expr, e, cs)?;
+                    let run_res = check_create(ts, e, cs, Some(&ty))?.0;
+                    //let run_res = consume_var(ts)?;
+                    ts.consume_tok(Close)?;
+                    Ok((
+                        Some(Rc::new(Expr::Run(run_expr, run_res, ty))),
+                        Rc::new(Expr::Type),
+                    ))
                 }
-            }),
-            ReverseSolidus => match ex_ty.ok_or(LfscError::UnascribedLambda)?.as_ref() {
-                &Expr::Pi {
-                    ref dom,
-                    ref rng,
-                    ref var,
-                    ref dependent,
-                } => {
-                    let act_var = ts.consume_ident()?.to_owned();
-                    let sym = Rc::new(e.new_symbol(act_var.clone()));
-                    let new_expected = Expr::sub(rng, &var.name, &sym);
-                    let old_binding = e.bind(act_var, sym, dom.clone());
-                    let res = check(ts, e, cs, Some(&new_expected), create)?.0;
-                    ts.consume_tok(Token::Close)?;
-                    e.unbind(old_binding);
-                    return Ok((
-                        if create {
-                            Some(Rc::new(Expr::Pi {
-                                var: var.clone(),
-                                dom: dom.clone(),
-                                rng: res.unwrap(),
-                                dependent: *dependent,
-                            }))
-                        } else {
-                            None
-                        },
-                        ex_ty.unwrap().clone(),
-                    ));
-                }
-                t => Err(LfscError::InvalidLambdaType(t.clone())),
-            },
-            Ident => check_app(ts, e, cs, ts.string(), create),
-            Caret => {
-                let run_expr = parse_term(ts, e, cs)?;
-                let ty = type_code(&run_expr, e, cs)?;
-                let run_res = check_create(ts, e, cs, Some(&ty))?.0;
-                //let run_res = consume_var(ts)?;
-                ts.consume_tok(Close)?;
-                Ok((
-                    Some(Rc::new(Expr::Run(run_expr, run_res, ty))),
-                    Rc::new(Expr::Type),
-                ))
+                t => Err(LfscError::UnexpectedToken("a typeable term", t)),
             }
-            t => Err(LfscError::UnexpectedToken("a typeable term", t)),
-        },
+        }
         t => Err(LfscError::UnexpectedToken("a typeable term", t)),
     }?;
     match ex_ty {
@@ -296,7 +300,7 @@ pub fn check_program<'a, L: Lexer<'a>>(
     let mut args = Vec::new();
     let mut unbinds = Vec::new();
     loop {
-        match ts.require_next()? {
+        match ts.require_next()?.tok {
             Token::Close => break,
             Token::Open => {
                 let (arg_ref, arg_ty) = check_arg(ts, e, cs)?;

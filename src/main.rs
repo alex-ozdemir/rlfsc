@@ -18,11 +18,12 @@ use env::{Consts, Env};
 use error::LfscError;
 use expr::Expr;
 use expr_check::{check, check_create, check_program};
-use token::{Lexer, Token, LogosLexer, DesugaringLexer};
+use token::{DesugaringLexer, Lexer, Token};
 
 fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
-    use Token::{Check, Declare, Define, Program, Opaque};
-    match ts.require_next()? {
+    use Token::{Check, Declare, Define, Opaque, Program};
+    let t = ts.require_next()?;
+    match t.tok {
         Declare => {
             let name = ts.consume_ident()?.to_owned();
             let (ty, kind) = check_create(ts, e, cs, None)?;
@@ -54,17 +55,17 @@ fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), 
         Check => {
             check(ts, e, cs, None, false)?;
         }
-        _ => return Err(LfscError::NotACmd(ts.string())),
+        _ => return Err(LfscError::NotACmd(t.string())),
     }
     ts.consume_tok(Token::Close)?;
     Ok(())
 }
 
 fn do_cmds<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
-    while let Some(t) = ts.next() {
-        match t {
+    while let Some(t) = ts.next()? {
+        match t.tok {
             Token::Open => do_cmd(ts, e, cs)?,
-            _t => return Err(LfscError::NotACmd(ts.string())),
+            _ => return Err(LfscError::NotACmd(t.string())),
         }
     }
     Ok(())

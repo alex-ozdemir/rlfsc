@@ -125,9 +125,10 @@ impl Code {
 }
 
 fn consume_new_binding<'a, L: Lexer<'a>>(ts: &mut L) -> Result<Binding, LfscError> {
-    match ts.require_next()? {
+    let t = ts.require_next()?;
+    match t.tok {
         Token::Hole => Ok(Binding::Hole),
-        Token::Ident => Ok(Binding::Var(Rc::new(Ref::new(ts.str().to_owned())))),
+        Token::Ident => Ok(Binding::Var(Rc::new(Ref::new(t.str().to_owned())))),
         t => Err(LfscError::WrongToken(Token::Ident, t)),
     }
 }
@@ -142,16 +143,17 @@ pub fn parse_term<'a, L: Lexer<'a>>(
     cs: &Consts,
 ) -> Result<Code, LfscError> {
     use Token::*;
-    match ts.require_next()? {
-        Ident => Ok(Code::Expr(e.expr_value(ts.str())?.clone())),
-        Natural => Ok(Code::NatLit(ts.nat())),
-        Rational => Ok(Code::RatLit(ts.rat())),
+    let t = ts.require_next()?;
+    match t.tok {
+        Ident => Ok(Code::Expr(e.expr_value(t.str())?.clone())),
+        Natural => Ok(Code::NatLit(t.nat())),
+        Rational => Ok(Code::RatLit(t.rat())),
         Open => {
             let nxt = ts.require_next()?;
-            let r = match nxt {
+            let r = match nxt.tok {
                 Do => {
                     let mut terms = Vec::new();
-                    while Some(Close) != ts.peek() {
+                    while Some(Close) != ts.peek_token() {
                         terms.push(parse_term(ts, e, cs)?);
                     }
                     if let Some(last) = terms.pop() {
@@ -163,7 +165,7 @@ pub fn parse_term<'a, L: Lexer<'a>>(
                 Match => {
                     let disc = parse_term(ts, e, cs)?;
                     let mut cases = Vec::new();
-                    while Some(Close) != ts.peek() {
+                    while Some(Close) != ts.peek_token() {
                         cases.push(parse_case(ts, e, cs)?);
                     }
                     if cases.len() == 0 {
@@ -174,20 +176,20 @@ pub fn parse_term<'a, L: Lexer<'a>>(
                 }
                 Fail => Ok(Code::Fail(Box::new(parse_term(ts, e, cs)?))),
                 MpAdd | MpMul | MpDiv => Ok(Code::MpBin(
-                    MpBinOp::from(nxt),
+                    MpBinOp::from(nxt.tok),
                     Box::new(parse_term(ts, e, cs)?),
                     Box::new(parse_term(ts, e, cs)?),
                 )),
                 MpNeg | Tilde => Ok(Code::MpNeg(Box::new(parse_term(ts, e, cs)?))),
                 MpIfNeg | MpIfZero => Ok(Code::MpCond(
-                    MpCond::from(nxt),
+                    MpCond::from(nxt.tok),
                     Box::new(parse_term(ts, e, cs)?),
                     Box::new(parse_term(ts, e, cs)?),
                     Box::new(parse_term(ts, e, cs)?),
                 )),
                 MpzToMpq => Ok(Code::NatToRat(Box::new(parse_term(ts, e, cs)?))),
                 IfEqual | Compare => Ok(Code::Cond(
-                    Cond::from(nxt),
+                    Cond::from(nxt.tok),
                     Box::new(parse_term(ts, e, cs)?),
                     Box::new(parse_term(ts, e, cs)?),
                     Box::new(parse_term(ts, e, cs)?),
@@ -204,10 +206,10 @@ pub fn parse_term<'a, L: Lexer<'a>>(
                     Ok(Code::Let(n, v, body))
                 }
                 IfMarked => {
-                    let n = if let "ifmarked" = ts.str() {
+                    let n = if let "ifmarked" = nxt.str() {
                         1
                     } else {
-                        u8::from_str(&ts.str()["ifmarked".len()..]).unwrap()
+                        u8::from_str(&nxt.str()["ifmarked".len()..]).unwrap()
                     };
                     Ok(Code::IfMarked(
                         n,
@@ -217,19 +219,19 @@ pub fn parse_term<'a, L: Lexer<'a>>(
                     ))
                 }
                 MarkVar => {
-                    let n = if let "markvar" = ts.str() {
+                    let n = if let "markvar" = nxt.str() {
                         1
                     } else {
-                        u8::from_str(&ts.str()["markvar".len()..]).unwrap()
+                        u8::from_str(&nxt.str()["markvar".len()..]).unwrap()
                     };
                     Ok(Code::Mark(n, Box::new(parse_term(ts, e, cs)?)))
                 }
                 Ident => {
                     // TODO(aozdemir) Lookup fun_name
-                    let fun_name = ts.str();
+                    let fun_name = nxt.str();
                     let fun = e.expr_value(fun_name)?.clone();
                     let mut args = Vec::new();
-                    while Some(Token::Close) != ts.peek() {
+                    while Some(Token::Close) != ts.peek_token() {
                         args.push(parse_term(ts, e, cs)?);
                     }
                     Ok(Code::App(fun, args))
@@ -249,11 +251,12 @@ fn parse_case<'a, L: Lexer<'a>>(
     cs: &Consts,
 ) -> Result<(Pattern, Code), LfscError> {
     ts.consume_tok(Token::Open)?;
-    let r = match ts.require_next()? {
+    let t = ts.require_next()?;
+    let r = match t.tok {
         Token::Open => {
             let fun = e.expr_value(ts.consume_ident()?)?.clone();
             let mut bindings = Vec::new();
-            while Some(Token::Close) != ts.peek() {
+            while Some(Token::Close) != ts.peek_token() {
                 bindings.push(consume_new_binding(ts)?);
             }
             ts.consume_tok(Token::Close)?;
@@ -279,7 +282,7 @@ fn parse_case<'a, L: Lexer<'a>>(
             Ok((r, t))
         }
         Token::Ident => Ok((
-            Pattern::Const(e.expr_value(ts.str())?.clone()),
+            Pattern::Const(e.expr_value(t.str())?.clone()),
             parse_term(ts, e, cs)?,
         )),
         Token::Default => Ok((Pattern::Default, parse_term(ts, e, cs)?)),

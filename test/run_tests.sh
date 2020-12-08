@@ -1,5 +1,7 @@
 #!/usr/bin/env zsh
 
+set -e
+
 mypath=$0:A:h
 tests=(
   ann_lambda.plf
@@ -41,6 +43,7 @@ tests=(
   sugar_assuming.plf
   sugar_forall.plf
   sugar_has_proof.plf
+  sugar_declare_rule.plf
   )
 
 cargo build
