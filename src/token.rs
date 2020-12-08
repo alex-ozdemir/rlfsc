@@ -151,7 +151,11 @@ pub trait Lexer<'a> {
         Ok(self.consume_tok(Token::Ident)?.str())
     }
     fn current_line(&self) -> (&'a str, Position) {
-        self.line_of(self.peek().map(|s| s.span.start).unwrap_or_else(|| self.bytes().len() - 1))
+        self.line_of(
+            self.peek()
+                .map(|s| s.span.start)
+                .unwrap_or_else(|| self.bytes().len() - 1),
+        )
     }
     /// For a given byte number, returns the line and the line number it lies in.
     fn line_of(&self, n: usize) -> (&'a str, Position) {
@@ -424,13 +428,22 @@ impl<'a> DesugaringLexer<'a> {
                     Token::Forall => Token::Bang,
                     Token::HasProof => Token::Colon,
                     Token::DeclareRule => Token::Declare,
+                    Token::DeclareType => Token::Declare,
+                    Token::Arrow => Token::Arrow,
                     _ => t.tok,
                 };
+                enum MacroArgs<'a> {
+                    // (identifier, arguments, result)
+                    Declare(TokenTree<'a>, Vec<TokenTree<'a>>, TokenTree<'a>),
+                    // (arguments, result)
+                    Arrow(Vec<TokenTree<'a>>, TokenTree<'a>),
+                    NoMacro,
+                }
                 let tok = t.tok;
                 let subbed_t = SpanTok::new(subbed_tok, t.slice, t.span);
                 self.inner.next()?;
                 // TODO: handle nested macro uses.
-                match t.tok {
+                let macro_pre_exp = match t.tok {
                     Token::DeclareRule => {
                         let id = self.inner.parse_tree()?;
                         let list = self
@@ -439,6 +452,37 @@ impl<'a> DesugaringLexer<'a> {
                             .as_list()
                             .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
                         let result = self.inner.parse_tree()?;
+                        MacroArgs::Declare(id, list, result)
+                    }
+                    Token::DeclareType => {
+                        let id = self.inner.parse_tree()?;
+                        let list = self
+                            .inner
+                            .parse_tree()?
+                            .as_list()
+                            .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
+                        let apx_pos = list[list.len() - 1].span_start();
+                        let apx_span = apx_pos..apx_pos;
+                        let result = TokenTree::Leaf(SpanTok::new(
+                            Token::Type,
+                            &b"type"[..],
+                            apx_span.clone(),
+                        ));
+                        MacroArgs::Declare(id, list, result)
+                    }
+                    Token::Arrow => {
+                        let list = self
+                            .inner
+                            .parse_tree()?
+                            .as_list()
+                            .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
+                        let result = self.inner.parse_tree()?;
+                        MacroArgs::Arrow(list, result)
+                    }
+                    _ => MacroArgs::NoMacro,
+                };
+                match macro_pre_exp {
+                    MacroArgs::Declare(id, list, result) => {
                         self.out.push_back(subbed_t);
                         id.into_token_list(&mut self.out);
                         let n_args = list.len() - 2;
@@ -475,9 +519,52 @@ impl<'a> DesugaringLexer<'a> {
                             ));
                         }
                     }
-                    _ => {
-                        self.out.push_back(subbed_t);
+                    MacroArgs::Arrow(list, result) => {
+                        // We've already popped a parenthesis from before the arrow, so we must
+                        // omit the first arg parenthesis.
+                        let mut first = true;
+                        let n_args = list.len() - 2;
+                        // Skip open and close
+                        for v in list.into_iter().skip(1).take(n_args) {
+                            let (id, ty) = v.as_var_decl().unwrap_or_else(|ty| {
+                                (
+                                    SpanTok::new(
+                                        Token::Ident,
+                                        &b"_"[..],
+                                        ty.span_start()..ty.span_start(),
+                                    ),
+                                    ty,
+                                )
+                            });
+                            let apx_span = ty.span_start()..ty.span_start();
+                            if first {
+                                first = false
+                            } else {
+                                self.out.push_back(SpanTok::new(
+                                    Token::Open,
+                                    &b"("[..],
+                                    apx_span.clone(),
+                                ));
+                            }
+                            self.out
+                                .push_back(SpanTok::new(Token::Bang, &b"!"[..], apx_span));
+                            self.out.push_back(id);
+                            ty.into_token_list(&mut self.out);
+                        }
+                        let apx_span = result.span_end()..result.span_end();
+                        result.into_token_list(&mut self.out);
+                        if n_args == 0 {
+                            return Err(LfscError::EmptyArrow);
+                        }
+                        for _ in 0..(n_args - 1) {
+                            self.out.push_back(SpanTok::new(
+                                Token::Close,
+                                &b")"[..],
+                                apx_span.clone(),
+                            ));
+                        }
                     }
+                    MacroArgs::NoMacro => self.out.push_back(subbed_t),
                 }
             } else {
                 return Ok(());

@@ -80,4 +80,6 @@ pub enum LfscError {
     CannotTypeKind,
     #[error("Expected a list after {0:?}, but got a single token {1:?}.")]
     ExpectedList(Token, Token),
+    #[error("Arrows must take at least 1 argument")]
+    EmptyArrow,
 }

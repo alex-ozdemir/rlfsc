@@ -44,6 +44,8 @@ tests=(
   sugar_forall.plf
   sugar_has_proof.plf
   sugar_declare_rule.plf
+  sugar_declare_type.plf
+  sugar_arrow.plf
   )
 
 cargo build
