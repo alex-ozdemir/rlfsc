@@ -195,7 +195,7 @@ pub fn parse_term<'a, L: Lexer<'a>>(
                     Box::new(parse_term(ts, e, cs)?),
                     Box::new(parse_term(ts, e, cs)?),
                 )),
-                Let => {
+                At => {
                     let n = consume_new_ref(ts)?;
                     let name = n.name.clone();
                     let ref_ = Rc::new(Expr::Ref(n.clone()));

@@ -6,4 +6,4 @@
 
 (check (% b bool
        (% b_pf (holds b)
-       (has-proof (holds b) b_pf))))
+       (proved-by (holds b) b_pf))))

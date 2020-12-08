@@ -106,10 +106,12 @@ pub enum Token {
     DeclareType,
     #[token(b"provided")]
     Provided,
-    #[token(b"has-proof")]
+    #[token(b"proved-by")]
     HasProof,
     #[token(b"assuming")]
     Assuming,
+    #[token(b"lam")]
+    Lam,
 
     #[regex(br"[^%!@:~\\^()0-9 \t\n\f][^() \t\n\f;]*")]
     Ident,
@@ -425,6 +427,8 @@ impl<'a> DesugaringLexer<'a> {
                 let subbed_tok = match t.tok {
                     Token::Provided => Token::Caret,
                     Token::Assuming => Token::Percent,
+                    Token::Lam => Token::ReverseSolidus,
+                    Token::Let => Token::At,
                     Token::Forall => Token::Bang,
                     Token::HasProof => Token::Colon,
                     Token::DeclareRule => Token::Declare,
