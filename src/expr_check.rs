@@ -65,25 +65,7 @@ fn check_pi<'a, L: Lexer<'a>>(
     let (range, range_ty) = check(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(old_binding);
-    if *range_ty == Expr::Type || *range_ty == Expr::Kind {
-        Ok((
-            if create {
-                // If there is only one reference to var now, then it must be free in the range.
-                let dependent = Rc::strong_count(&var) > 1;
-                Some(Rc::new(Expr::Pi {
-                    var,
-                    dom: domain,
-                    rng: range.unwrap(),
-                    dependent,
-                }))
-            } else {
-                None
-            },
-            range_ty,
-        ))
-    } else {
-        Err(LfscError::InvalidPiRange((*range_ty).clone()))
-    }
+    build_validate_pi(vec![(var, domain)], range, range_ty, create)
 }
 
 fn check_let<'a, L: Lexer<'a>>(
@@ -153,7 +135,7 @@ fn check_list_decl<'a, L: Lexer<'a>>(
     }
 }
 
-fn check_decl_list<'a, L: Lexer<'a>>(
+pub fn check_decl_list<'a, L: Lexer<'a>>(
     ts: &mut L,
     e: &mut Env,
     cs: &Consts,
@@ -190,18 +172,28 @@ fn check_arrow<'a, L: Lexer<'a>>(
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
     let (args, old_binds) = check_decl_list(ts, e, cs, create)?;
-    let (ret, ret_kind) = check_create(ts, e, cs, None)?;
+    let (ret, ret_kind) = check(ts, e, cs, None, create)?;
+    e.unbind_all(old_binds);
+    ts.consume_tok(Token::Close)?;
+    build_validate_pi(args, ret, ret_kind, create)
+}
+
+pub fn build_validate_pi(
+    args: Vec<(Rc<Ref>, Rc<Expr>)>,
+    ret: Option<Rc<Expr>>,
+    ret_kind: Rc<Expr>,
+    create: bool,
+) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
     if *ret_kind == Expr::Type || *ret_kind == Expr::Kind {
-        ts.consume_tok(Token::Close)?;
-        e.unbind_all(old_binds);
         Ok((
             if create {
-                Some(args.into_iter().rev().fold(ret, |rng, (var, dom)| {
+                Some(args.into_iter().rev().fold(ret.unwrap(), |rng, (var, dom)| {
+                    let dependent = Rc::strong_count(&var) > 1;
                     Rc::new(Expr::Pi {
                         dom,
                         rng,
                         var,
-                        dependent: true,
+                        dependent,
                     })
                 }))
             } else {
@@ -210,7 +202,7 @@ fn check_arrow<'a, L: Lexer<'a>>(
             ret_kind,
         ))
     } else {
-        Err(LfscError::InvalidPiRange((*ret).clone()))
+        Err(LfscError::InvalidPiRange((*ret.unwrap()).clone()))
     }
 }
 

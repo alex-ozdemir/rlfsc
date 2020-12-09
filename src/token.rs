@@ -422,7 +422,7 @@ impl<'a> SpanTok<'a> {
 impl<'a> DesugaringLexer<'a> {
     fn pull(&mut self) -> Result<(), LfscError> {
         while self.out.len() == 0 {
-            if let Some(t) = self.inner.peek() {
+            if let Some(t) = self.inner.next()? {
                 // Implement token substitutions
                 let subbed_tok = match t.tok {
                     Token::Provided => Token::Caret,
@@ -430,144 +430,10 @@ impl<'a> DesugaringLexer<'a> {
                     Token::Let => Token::At,
                     Token::Forall => Token::Bang,
                     Token::HasProof => Token::Colon,
-                    Token::DeclareRule => Token::Declare,
-                    Token::DeclareType => Token::Declare,
                     _ => t.tok,
                 };
-                enum MacroArgs<'a> {
-                    // (identifier, arguments, result)
-                    Declare(TokenTree<'a>, Vec<TokenTree<'a>>, TokenTree<'a>),
-                    // (arguments, result)
-                    Arrow(Vec<TokenTree<'a>>, TokenTree<'a>),
-                    NoMacro,
-                }
-                let tok = t.tok;
                 let subbed_t = SpanTok::new(subbed_tok, t.slice, t.span);
-                self.inner.next()?;
-                // TODO: handle nested macro uses.
-                let macro_pre_exp = match t.tok {
-                    Token::DeclareRule => {
-                        let id = self.inner.parse_tree()?;
-                        let list = self
-                            .inner
-                            .parse_tree()?
-                            .as_list()
-                            .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
-                        let result = self.inner.parse_tree()?;
-                        MacroArgs::Declare(id, list, result)
-                    }
-                    Token::DeclareType => {
-                        let id = self.inner.parse_tree()?;
-                        let list = self
-                            .inner
-                            .parse_tree()?
-                            .as_list()
-                            .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
-                        let apx_pos = list[list.len() - 1].span_start();
-                        let apx_span = apx_pos..apx_pos;
-                        let result = TokenTree::Leaf(SpanTok::new(
-                            Token::Type,
-                            &b"type"[..],
-                            apx_span.clone(),
-                        ));
-                        MacroArgs::Declare(id, list, result)
-                    }
-                    //Token::Arrow => {
-                    //    let list = self
-                    //        .inner
-                    //        .parse_tree()?
-                    //        .as_list()
-                    //        .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
-                    //    let result = self.inner.parse_tree()?;
-                    //    MacroArgs::Arrow(list, result)
-                    //}
-                    _ => MacroArgs::NoMacro,
-                };
-                match macro_pre_exp {
-                    MacroArgs::Declare(id, list, result) => {
-                        self.out.push_back(subbed_t);
-                        id.into_token_list(&mut self.out);
-                        let n_args = list.len() - 2;
-                        // Skip open and close
-                        for v in list.into_iter().skip(1).take(n_args) {
-                            let (id, ty) = v.as_var_decl().unwrap_or_else(|ty| {
-                                (
-                                    SpanTok::new(
-                                        Token::Ident,
-                                        &b"_"[..],
-                                        ty.span_start()..ty.span_start(),
-                                    ),
-                                    ty,
-                                )
-                            });
-                            let apx_span = ty.span_start()..ty.span_start();
-                            self.out.push_back(SpanTok::new(
-                                Token::Open,
-                                &b"("[..],
-                                apx_span.clone(),
-                            ));
-                            self.out
-                                .push_back(SpanTok::new(Token::Bang, &b"!"[..], apx_span));
-                            self.out.push_back(id);
-                            ty.into_token_list(&mut self.out);
-                        }
-                        let apx_span = result.span_end()..result.span_end();
-                        result.into_token_list(&mut self.out);
-                        for _ in 0..n_args {
-                            self.out.push_back(SpanTok::new(
-                                Token::Close,
-                                &b")"[..],
-                                apx_span.clone(),
-                            ));
-                        }
-                    }
-                    MacroArgs::Arrow(list, result) => {
-                        // We've already popped a parenthesis from before the arrow, so we must
-                        // omit the first arg parenthesis.
-                        let mut first = true;
-                        let n_args = list.len() - 2;
-                        // Skip open and close
-                        for v in list.into_iter().skip(1).take(n_args) {
-                            let (id, ty) = v.as_var_decl().unwrap_or_else(|ty| {
-                                (
-                                    SpanTok::new(
-                                        Token::Ident,
-                                        &b"_"[..],
-                                        ty.span_start()..ty.span_start(),
-                                    ),
-                                    ty,
-                                )
-                            });
-                            let apx_span = ty.span_start()..ty.span_start();
-                            if first {
-                                first = false
-                            } else {
-                                self.out.push_back(SpanTok::new(
-                                    Token::Open,
-                                    &b"("[..],
-                                    apx_span.clone(),
-                                ));
-                            }
-                            self.out
-                                .push_back(SpanTok::new(Token::Bang, &b"!"[..], apx_span));
-                            self.out.push_back(id);
-                            ty.into_token_list(&mut self.out);
-                        }
-                        let apx_span = result.span_end()..result.span_end();
-                        result.into_token_list(&mut self.out);
-                        if n_args == 0 {
-                            return Err(LfscError::EmptyArrow);
-                        }
-                        for _ in 0..(n_args - 1) {
-                            self.out.push_back(SpanTok::new(
-                                Token::Close,
-                                &b")"[..],
-                                apx_span.clone(),
-                            ));
-                        }
-                    }
-                    MacroArgs::NoMacro => self.out.push_back(subbed_t),
-                }
+                self.out.push_back(subbed_t);
             } else {
                 return Ok(());
             }

@@ -17,11 +17,11 @@ mod token;
 use env::{Consts, Env};
 use error::LfscError;
 use expr::Expr;
-use expr_check::{check, check_create, check_program};
+use expr_check::{check, check_create, check_program, check_decl_list, build_validate_pi};
 use token::{DesugaringLexer, Lexer, Token};
 
 fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
-    use Token::{Check, Declare, Define, Opaque, Program};
+    use Token::{Check, Declare, Define, Opaque, Program, DeclareRule, DeclareType};
     let t = ts.require_next()?;
     match t.tok {
         Declare => {
@@ -35,6 +35,23 @@ fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), 
                 ));
             }
             let sym = Rc::new(e.new_symbol(name.clone()));
+            e.bind(name.clone(), sym, ty);
+        }
+        DeclareRule => {
+            let name = ts.consume_ident()?.to_owned();
+            let (args, old_binds) = check_decl_list(ts, e, cs, true)?;
+            let (ret, ret_kind) = check_create(ts, e, cs, None)?;
+            e.unbind_all(old_binds);
+            let sym = Rc::new(e.new_symbol(name.clone()));
+            let ty = build_validate_pi(args, Some(ret), ret_kind, true)?.0.unwrap();
+            e.bind(name.clone(), sym, ty);
+        }
+        DeclareType => {
+            let name = ts.consume_ident()?.to_owned();
+            let (args, old_binds) = check_decl_list(ts, e, cs, true)?;
+            e.unbind_all(old_binds);
+            let sym = Rc::new(e.new_symbol(name.clone()));
+            let ty = build_validate_pi(args, Some(cs.type_.clone()), cs.kind.clone(), true)?.0.unwrap();
             e.bind(name.clone(), sym, ty);
         }
         Define => {
