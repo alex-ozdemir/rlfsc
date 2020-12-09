@@ -426,14 +426,12 @@ impl<'a> DesugaringLexer<'a> {
                 // Implement token substitutions
                 let subbed_tok = match t.tok {
                     Token::Provided => Token::Caret,
-                    Token::Assuming => Token::Percent,
                     Token::Lam => Token::ReverseSolidus,
                     Token::Let => Token::At,
                     Token::Forall => Token::Bang,
                     Token::HasProof => Token::Colon,
                     Token::DeclareRule => Token::Declare,
                     Token::DeclareType => Token::Declare,
-                    Token::Arrow => Token::Arrow,
                     _ => t.tok,
                 };
                 enum MacroArgs<'a> {
@@ -474,15 +472,15 @@ impl<'a> DesugaringLexer<'a> {
                         ));
                         MacroArgs::Declare(id, list, result)
                     }
-                    Token::Arrow => {
-                        let list = self
-                            .inner
-                            .parse_tree()?
-                            .as_list()
-                            .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
-                        let result = self.inner.parse_tree()?;
-                        MacroArgs::Arrow(list, result)
-                    }
+                    //Token::Arrow => {
+                    //    let list = self
+                    //        .inner
+                    //        .parse_tree()?
+                    //        .as_list()
+                    //        .map_err(|s| LfscError::ExpectedList(tok, s.tok))?;
+                    //    let result = self.inner.parse_tree()?;
+                    //    MacroArgs::Arrow(list, result)
+                    //}
                     _ => MacroArgs::NoMacro,
                 };
                 match macro_pre_exp {

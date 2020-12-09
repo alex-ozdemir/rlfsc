@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use crate::code::{parse_term, run_code, type_code, Code};
-use crate::env::{Consts, Env};
+use crate::env::{Consts, Env, OldBinding};
 use crate::error::LfscError;
 use crate::expr::{Expr, Program, Ref};
 use crate::token::{Lexer, Token};
@@ -129,6 +129,105 @@ fn check_big_lambda<'a, L: Lexer<'a>>(
     Ok((v, t))
 }
 
+// Consumes an entry from a declaration list.
+fn check_list_decl<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+) -> Result<(Option<Rc<Ref>>, Rc<Expr>), LfscError> {
+    if ts.peek_token() == Some(Token::Open) {
+        ts.next()?;
+        if ts.peek_token() == Some(Token::Id) {
+            ts.next()?;
+            let var = consume_new_ref(ts)?;
+            let (ty, _) = check_create(ts, e, cs, Some(&cs.type_))?;
+            ts.consume_tok(Token::Close)?;
+            Ok((Some(var), ty))
+        } else {
+            let ty = check_form(ts, e, cs, None, true)?.0.unwrap();
+            Ok((None, ty))
+        }
+    } else {
+        let (ty, _) = check_create(ts, e, cs, Some(&cs.type_))?;
+        Ok((None, ty))
+    }
+}
+
+fn check_decl_list<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+    create: bool,
+) -> Result<(Vec<(Rc<Ref>, Rc<Expr>)>, Vec<OldBinding>), LfscError> {
+    let mut old_binds = Vec::new();
+    let mut args = Vec::new();
+    ts.consume_tok(Token::Open)?;
+    while ts.peek_token() != Some(Token::Close) {
+        let (var, ty) = check_list_decl(ts, e, cs)?;
+        if let Some(var) = &var {
+            old_binds.push(e.bind(
+                var.name.clone(),
+                Rc::new(Expr::Ref(var.clone())),
+                ty.clone(),
+            ));
+        }
+        if create {
+            if let Some(var) = var {
+                args.push((var, ty));
+            } else {
+                args.push((Rc::new(Ref::new("_".to_owned())), ty));
+            }
+        }
+    }
+    ts.next()?;
+    Ok((args, old_binds))
+}
+
+fn check_arrow<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+    create: bool,
+) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
+    let (args, old_binds) = check_decl_list(ts, e, cs, create)?;
+    let (ret, ret_kind) = check_create(ts, e, cs, None)?;
+    if *ret_kind == Expr::Type || *ret_kind == Expr::Kind {
+        ts.consume_tok(Token::Close)?;
+        e.unbind_all(old_binds);
+        Ok((
+            if create {
+                Some(args.into_iter().rev().fold(ret, |rng, (var, dom)| {
+                    Rc::new(Expr::Pi {
+                        dom,
+                        rng,
+                        var,
+                        dependent: true,
+                    })
+                }))
+            } else {
+                None
+            },
+            ret_kind,
+        ))
+    } else {
+        Err(LfscError::InvalidPiRange((*ret).clone()))
+    }
+}
+
+fn check_assuming<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+    create: bool,
+) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
+    // Don't care about assumption arguments.
+    let (_, old_binds) = check_decl_list(ts, e, cs, false)?;
+    let (v, t) = check(ts, e, cs, None, create)?;
+    e.unbind_all(old_binds);
+    ts.consume_tok(Token::Close)?;
+    Ok((v, t))
+}
+
 fn check_app<'a, L: Lexer<'a>>(
     ts: &mut L,
     e: &mut Env,
@@ -195,6 +294,79 @@ pub fn check_create<'a, L: Lexer<'a>>(
     check(ts, e, cs, ex_ty, true).map(|(a, b)| (a.unwrap(), b))
 }
 
+pub fn check_form<'a, L: Lexer<'a>>(
+    ts: &mut L,
+    e: &mut Env,
+    cs: &Consts,
+    ex_ty: Option<&Rc<Expr>>,
+    create: bool,
+) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
+    use Token::*;
+    let t_head = ts.require_next()?;
+    match t_head.tok {
+        Bang => check_pi(ts, e, cs, create),
+        Arrow => check_arrow(ts, e, cs, create),
+        Assuming => check_assuming(ts, e, cs, create),
+        Pound => check_ann_lambda(ts, e, cs, create),
+        At => check_let(ts, e, cs, create),
+        Colon => check_ascription(ts, e, cs, create),
+        Percent => check_big_lambda(ts, e, cs, create),
+        Tilde => Ok({
+            let (t, ty) = check(ts, e, cs, None, create)?;
+            ty.require_mp_ty()?;
+            ts.consume_tok(Close)?;
+            if create {
+                (Some(Rc::new(t.unwrap().mp_neg()?)), ty)
+            } else {
+                (None, ty)
+            }
+        }),
+        ReverseSolidus => match ex_ty.ok_or(LfscError::UnascribedLambda)?.as_ref() {
+            &Expr::Pi {
+                ref dom,
+                ref rng,
+                ref var,
+                ref dependent,
+            } => {
+                let act_var = ts.consume_ident()?.to_owned();
+                let sym = Rc::new(e.new_symbol(act_var.clone()));
+                let new_expected = Expr::sub(rng, &var.name, &sym);
+                let old_binding = e.bind(act_var, sym, dom.clone());
+                let res = check(ts, e, cs, Some(&new_expected), create)?.0;
+                ts.consume_tok(Token::Close)?;
+                e.unbind(old_binding);
+                return Ok((
+                    if create {
+                        Some(Rc::new(Expr::Pi {
+                            var: var.clone(),
+                            dom: dom.clone(),
+                            rng: res.unwrap(),
+                            dependent: *dependent,
+                        }))
+                    } else {
+                        None
+                    },
+                    ex_ty.unwrap().clone(),
+                ));
+            }
+            t => Err(LfscError::InvalidLambdaType(t.clone())),
+        },
+        Ident => check_app(ts, e, cs, t_head.string(), create),
+        Caret => {
+            let run_expr = parse_term(ts, e, cs)?;
+            let ty = type_code(&run_expr, e, cs)?;
+            let run_res = check_create(ts, e, cs, Some(&ty))?.0;
+            //let run_res = consume_var(ts)?;
+            ts.consume_tok(Close)?;
+            Ok((
+                Some(Rc::new(Expr::Run(run_expr, run_res, ty))),
+                Rc::new(Expr::Type),
+            ))
+        }
+        t => Err(LfscError::UnexpectedToken("a typeable term", t)),
+    }
+}
+
 pub fn check<'a, L: Lexer<'a>>(
     ts: &mut L,
     e: &mut Env,
@@ -219,69 +391,7 @@ pub fn check<'a, L: Lexer<'a>>(
                 (None, res.ty.clone())
             }
         }),
-        Open => {
-            let t_head = ts.require_next()?;
-            match t_head.tok {
-                Bang => check_pi(ts, e, cs, create),
-                Pound => check_ann_lambda(ts, e, cs, create),
-                At => check_let(ts, e, cs, create),
-                Colon => check_ascription(ts, e, cs, create),
-                Percent => check_big_lambda(ts, e, cs, create),
-                Tilde => Ok({
-                    let (t, ty) = check(ts, e, cs, None, create)?;
-                    ty.require_mp_ty()?;
-                    ts.consume_tok(Close)?;
-                    if create {
-                        (Some(Rc::new(t.unwrap().mp_neg()?)), ty)
-                    } else {
-                        (None, ty)
-                    }
-                }),
-                ReverseSolidus => match ex_ty.ok_or(LfscError::UnascribedLambda)?.as_ref() {
-                    &Expr::Pi {
-                        ref dom,
-                        ref rng,
-                        ref var,
-                        ref dependent,
-                    } => {
-                        let act_var = ts.consume_ident()?.to_owned();
-                        let sym = Rc::new(e.new_symbol(act_var.clone()));
-                        let new_expected = Expr::sub(rng, &var.name, &sym);
-                        let old_binding = e.bind(act_var, sym, dom.clone());
-                        let res = check(ts, e, cs, Some(&new_expected), create)?.0;
-                        ts.consume_tok(Token::Close)?;
-                        e.unbind(old_binding);
-                        return Ok((
-                            if create {
-                                Some(Rc::new(Expr::Pi {
-                                    var: var.clone(),
-                                    dom: dom.clone(),
-                                    rng: res.unwrap(),
-                                    dependent: *dependent,
-                                }))
-                            } else {
-                                None
-                            },
-                            ex_ty.unwrap().clone(),
-                        ));
-                    }
-                    t => Err(LfscError::InvalidLambdaType(t.clone())),
-                },
-                Ident => check_app(ts, e, cs, t_head.string(), create),
-                Caret => {
-                    let run_expr = parse_term(ts, e, cs)?;
-                    let ty = type_code(&run_expr, e, cs)?;
-                    let run_res = check_create(ts, e, cs, Some(&ty))?.0;
-                    //let run_res = consume_var(ts)?;
-                    ts.consume_tok(Close)?;
-                    Ok((
-                        Some(Rc::new(Expr::Run(run_expr, run_res, ty))),
-                        Rc::new(Expr::Type),
-                    ))
-                }
-                t => Err(LfscError::UnexpectedToken("a typeable term", t)),
-            }
-        }
+        Open => check_form(ts, e, cs, ex_ty, create),
         t => Err(LfscError::UnexpectedToken("a typeable term", t)),
     }?;
     match ex_ty {
@@ -338,9 +448,7 @@ pub fn check_program<'a, L: Lexer<'a>>(
     let body = parse_term(ts, e, cs)?;
     let body_ty = type_code(&body, e, cs)?;
     e.unify(&body_ty, &ret_ty)?;
-    for u in unbinds {
-        e.unbind(u);
-    }
+    e.unbind_all(unbinds);
     if let Expr::Program(pgm) = e.expr_value(&name)?.as_ref() {
         pgm.body.replace(body);
     } else {

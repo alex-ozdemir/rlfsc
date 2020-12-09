@@ -35,7 +35,7 @@ impl Default for Env {
     }
 }
 
-type OldBinding = (String, Option<ExprEnvEntry>);
+pub type OldBinding = (String, Option<ExprEnvEntry>);
 
 impl Env {
     pub fn bind(&mut self, name: String, val: Rc<Expr>, ty: Rc<Expr>) -> OldBinding {
@@ -48,6 +48,11 @@ impl Env {
             self.types.insert(name, val);
         } else {
             self.types.remove(&name);
+        }
+    }
+    pub fn unbind_all<I: IntoIterator<Item=OldBinding>>(&mut self, bs: I) {
+        for b in bs {
+            self.unbind(b);
         }
     }
     pub fn binding(&self, name: &str) -> Result<&ExprEnvEntry, LfscError> {

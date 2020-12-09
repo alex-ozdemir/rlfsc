@@ -4,5 +4,6 @@
 
 (declare holds (! b bool type))
 
-(check (assuming b bool (assuming b_pf (holds b)
-                                  (: (holds b) b_pf))))
+(check (assuming ((id b bool)
+                  (id b_pf (holds b)))
+                                  (: (holds b) b_pf)))

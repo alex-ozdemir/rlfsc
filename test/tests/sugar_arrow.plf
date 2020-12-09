@@ -7,11 +7,11 @@
 ; (declare bad (-> () bool))
 
 (declare pf_and
-         (! a bool
-         (! b bool
-         (! a_pf (holds a)
-         (! b_pf (holds b)
-            (holds (and a b)))))))
+         (-> ((id a bool)
+              (id b bool)
+              (holds a)
+              (holds b))
+             (holds (and a b))))
 
 (check
   (% a bool
