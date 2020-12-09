@@ -94,24 +94,26 @@ pub enum Token {
     Rational,
 
     // Extension tokens
-    #[token(b"id")]
-    Id,
-    #[token(b"->")]
-    Arrow,
+    // Aliases
     #[token(b"Forall")]
     Forall,
-    #[token(b"declare-rule")]
-    DeclareRule,
-    #[token(b"declare-type")]
-    DeclareType,
     #[token(b"provided")]
     Provided,
     #[token(b"proved-by")]
     HasProof,
-    #[token(b"assuming")]
-    Assuming,
     #[token(b"lam")]
     Lam,
+    // Proper extensions
+    #[token(b"id")]
+    Id,
+    #[token(b"->")]
+    Arrow,
+    #[token(b"declare-rule")]
+    DeclareRule,
+    #[token(b"declare-type")]
+    DeclareType,
+    #[token(b"assuming")]
+    Assuming,
 
     #[regex(br"[^%!@:~\\^()0-9 \t\n\f][^() \t\n\f;]*")]
     Ident,
@@ -252,36 +254,16 @@ impl<'a> Lexer<'a> for LogosLexer<'a> {
 ///
 /// `DesugaringLexer` implements a streaming macro-expander of shorts.
 ///
-/// It performs two kinds of expansions: substitutions and de-variadification.
+/// It performs one kinds of expansion: substitutions
 ///
 /// ## Substitutions
 ///
 /// These are simple enough. One token is taken is replaced by another. They are:
 ///    * `provided` with `^`
 ///    * `has-proof` with `:`
-///    * `assuming` with `%`
+///    * `lam` with `\`
 ///    * `Forall` with `!`
-///
-/// ## De-variadification
-///
-/// This is a more complex process. The idea is to replace certain variadic forms with non-variadic
-/// forms. Each variadic form is indicated with a head keyword. The keywords are
-///    * `->`
-///    * `declare-rule`
-///    * `declare-type`
-///
-/// The first is a *term* form. The latter two are *command* forms.
-///
-/// Let's give examples of the use of each, and their expansions:
-///
-///    * `(-> (a (id i b)) (k a i))` to `(! _ a (! i b (k a i)))`
-///    * `(declare-rule and_pf ((id a bool) (id b bool) (holds a) (holds b)) (holds (and a b)))` to
-///      `(declare and_pf (! a bool (! b bool (! _ (holds a ) (! _ (holds b) (holds (and a b)))))))`.
-///
-/// (where _ denotes an arbitrary name)
-///
-///
-///
+///    * `let` with `@`
 pub struct DesugaringLexer<'a> {
     inner: LogosLexer<'a>,
     // To be outputted
