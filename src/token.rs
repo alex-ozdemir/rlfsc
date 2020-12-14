@@ -99,21 +99,19 @@ pub enum Token {
     Forall,
     #[token(b"provided")]
     Provided,
-    #[token(b"proved-by")]
-    HasProof,
     #[token(b"lam")]
     Lam,
     // Proper extensions
-    #[token(b"id")]
-    Id,
     #[token(b"->")]
     Arrow,
     #[token(b"declare-rule")]
     DeclareRule,
     #[token(b"declare-type")]
     DeclareType,
-    #[token(b"assuming")]
-    Assuming,
+    #[token(b"define-const")]
+    DefineConst,
+    #[token(b"check-assuming")]
+    CheckAssuming,
 
     #[regex(br"[^%!@:~\\^()0-9 \t\n\f][^() \t\n\f;]*")]
     Ident,
@@ -317,7 +315,6 @@ impl<'a> DesugaringLexer<'a> {
                     Token::Lam => Token::ReverseSolidus,
                     Token::Let => Token::At,
                     Token::Forall => Token::Bang,
-                    Token::HasProof => Token::Colon,
                     _ => t.tok,
                 };
                 let subbed_t = SpanTok::new(subbed_tok, t.slice, t.span);

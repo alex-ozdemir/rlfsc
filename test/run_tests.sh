@@ -42,7 +42,7 @@ tests=(
   sugar_provided.plf
   sugar_assuming.plf
   sugar_forall.plf
-  sugar_proved_by.plf
+  sugar_define_const.plf
   sugar_declare_rule.plf
   sugar_declare_type.plf
   sugar_arrow.plf

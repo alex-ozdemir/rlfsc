@@ -27,26 +27,7 @@ fn check_ann_lambda<'a, L: Lexer<'a>>(
     let (range, range_ty) = check(ts, e, cs, None, create)?;
     ts.consume_tok(Token::Close)?;
     e.unbind(old_binding);
-    // TODO: assert that var is not bound in range_ty.
-    Ok((
-        if create {
-            // If there is only one reference to var now, then it must be free in the range.
-            Some(Rc::new(Expr::Pi {
-                var: var.clone(),
-                dom: domain.clone(),
-                rng: range.unwrap(),
-                dependent: false,
-            }))
-        } else {
-            None
-        },
-        Rc::new(Expr::Pi {
-            var,
-            dom: domain,
-            rng: range_ty,
-            dependent: false,
-        }),
-    ))
+    build_macro(vec![(var, domain)], range, range_ty)
 }
 
 fn check_pi<'a, L: Lexer<'a>>(
@@ -119,7 +100,7 @@ fn check_list_decl<'a, L: Lexer<'a>>(
 ) -> Result<(Option<Rc<Ref>>, Rc<Expr>), LfscError> {
     if ts.peek_token() == Some(Token::Open) {
         ts.next()?;
-        if ts.peek_token() == Some(Token::Id) {
+        if ts.peek_token() == Some(Token::Colon) {
             ts.next()?;
             let var = consume_new_ref(ts)?;
             let (ty, _) = check_create(ts, e, cs, Some(&cs.type_))?;
@@ -187,15 +168,19 @@ pub fn build_validate_pi(
     if *ret_kind == Expr::Type || *ret_kind == Expr::Kind {
         Ok((
             if create {
-                Some(args.into_iter().rev().fold(ret.unwrap(), |rng, (var, dom)| {
-                    let dependent = Rc::strong_count(&var) > 1;
-                    Rc::new(Expr::Pi {
-                        dom,
-                        rng,
-                        var,
-                        dependent,
-                    })
-                }))
+                Some(
+                    args.into_iter()
+                        .rev()
+                        .fold(ret.unwrap(), |rng, (var, dom)| {
+                            let dependent = Rc::strong_count(&var) > 1;
+                            Rc::new(Expr::Pi {
+                                dom,
+                                rng,
+                                var,
+                                dependent,
+                            })
+                        }),
+                )
             } else {
                 None
             },
@@ -206,18 +191,35 @@ pub fn build_validate_pi(
     }
 }
 
-fn check_assuming<'a, L: Lexer<'a>>(
-    ts: &mut L,
-    e: &mut Env,
-    cs: &Consts,
-    create: bool,
+pub fn build_macro(
+    args: Vec<(Rc<Ref>, Rc<Expr>)>,
+    ret: Option<Rc<Expr>>,
+    ret_kind: Rc<Expr>,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
-    // Don't care about assumption arguments.
-    let (_, old_binds) = check_decl_list(ts, e, cs, false)?;
-    let (v, t) = check(ts, e, cs, None, create)?;
-    e.unbind_all(old_binds);
-    ts.consume_tok(Token::Close)?;
-    Ok((v, t))
+    Ok(args
+        .into_iter()
+        .rev()
+        .fold((ret, ret_kind), |(retm, ret_kind), (var, dom)| {
+            // Check that dependent is false
+            (
+                if let Some(ret) = retm {
+                    Some(Rc::new(Expr::Pi {
+                        var: var.clone(),
+                        dom: dom.clone(),
+                        rng: ret,
+                        dependent: false,
+                    }))
+                } else {
+                    None
+                },
+                Rc::new(Expr::Pi {
+                    var,
+                    dom,
+                    rng: ret_kind,
+                    dependent: false,
+                }),
+            )
+        }))
 }
 
 fn check_app<'a, L: Lexer<'a>>(
@@ -298,7 +300,6 @@ pub fn check_form<'a, L: Lexer<'a>>(
     match t_head.tok {
         Bang => check_pi(ts, e, cs, create),
         Arrow => check_arrow(ts, e, cs, create),
-        Assuming => check_assuming(ts, e, cs, create),
         Pound => check_ann_lambda(ts, e, cs, create),
         At => check_let(ts, e, cs, create),
         Colon => check_ascription(ts, e, cs, create),

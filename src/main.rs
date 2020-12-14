@@ -17,11 +17,13 @@ mod token;
 use env::{Consts, Env};
 use error::LfscError;
 use expr::Expr;
-use expr_check::{check, check_create, check_program, check_decl_list, build_validate_pi};
+use expr_check::{
+    build_macro, build_validate_pi, check, check_create, check_decl_list, check_program,
+};
 use token::{DesugaringLexer, Lexer, Token};
 
 fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), LfscError> {
-    use Token::{Check, Declare, Define, Opaque, Program, DeclareRule, DeclareType};
+    use Token::{Check, CheckAssuming, Declare, DeclareRule, DeclareType, DefineConst, Define, Opaque, Program};
     let t = ts.require_next()?;
     match t.tok {
         Declare => {
@@ -43,7 +45,9 @@ fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), 
             let (ret, ret_kind) = check_create(ts, e, cs, None)?;
             e.unbind_all(old_binds);
             let sym = Rc::new(e.new_symbol(name.clone()));
-            let ty = build_validate_pi(args, Some(ret), ret_kind, true)?.0.unwrap();
+            let ty = build_validate_pi(args, Some(ret), ret_kind, true)?
+                .0
+                .unwrap();
             e.bind(name.clone(), sym, ty);
         }
         DeclareType => {
@@ -51,8 +55,18 @@ fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), 
             let (args, old_binds) = check_decl_list(ts, e, cs, true)?;
             e.unbind_all(old_binds);
             let sym = Rc::new(e.new_symbol(name.clone()));
-            let ty = build_validate_pi(args, Some(cs.type_.clone()), cs.kind.clone(), true)?.0.unwrap();
+            let ty = build_validate_pi(args, Some(cs.type_.clone()), cs.kind.clone(), true)?
+                .0
+                .unwrap();
             e.bind(name.clone(), sym, ty);
+        }
+        DefineConst => {
+            let name = ts.consume_ident()?.to_owned();
+            let (args, old_binds) = check_decl_list(ts, e, cs, true)?;
+            let (ret, ret_kind) = check_create(ts, e, cs, None)?;
+            let (value, ty) = build_macro(args, Some(ret), ret_kind)?;
+            e.unbind_all(old_binds);
+            e.bind(name, value.unwrap(), ty);
         }
         Define => {
             let name = ts.consume_ident()?.to_owned();
@@ -68,6 +82,12 @@ fn do_cmd<'a, L: Lexer<'a>>(ts: &mut L, e: &mut Env, cs: &Consts) -> Result<(), 
         Program => {
             // It binds the program internally
             check_program(ts, e, cs)?;
+        }
+        CheckAssuming => {
+            let (_, old_binds) = check_decl_list(ts, e, cs, false)?;
+            let ex_type = check(ts, e, cs, Some(&cs.type_), true)?.0.unwrap();
+            let (_, _) = check(ts, e, cs, Some(&ex_type), false)?;
+            e.unbind_all(old_binds);
         }
         Check => {
             check(ts, e, cs, None, false)?;

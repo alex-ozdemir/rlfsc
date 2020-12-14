@@ -7,8 +7,8 @@
 ; (declare bad (-> () bool))
 
 (declare pf_and
-         (-> ((id a bool)
-              (id b bool)
+         (-> ((: a bool)
+              (: b bool)
               (holds a)
               (holds b))
              (holds (and a b))))
