@@ -48,6 +48,7 @@ tests=(
   sugar_arrow.plf
   sugar_lam.plf
   sugar_let.plf
+  sugar_skolem.plf
   )
 
 cargo build
