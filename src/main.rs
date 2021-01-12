@@ -1,6 +1,8 @@
 use rlimit::{Resource, RLIM_INFINITY};
+use structopt::clap::arg_enum;
 use structopt::StructOpt;
 use yansi::Paint;
+use atty;
 
 use std::default::Default;
 use std::fs::read;
@@ -115,9 +117,28 @@ struct Args {
     #[structopt(short = "t", long)]
     trace_sc: bool,
 
+    /// Whether to use color ouput
+    #[structopt(short = "c", long, possible_values = &ColorCfg::variants(), case_insensitive = true, default_value = "auto")]
+    color: ColorCfg,
+
     /// Files to type-check, in order.
     #[structopt(name = "FILE", parse(from_os_str))]
     files: Vec<PathBuf>,
+}
+
+arg_enum! {
+    #[derive(Debug, PartialEq, Eq)]
+    enum ColorCfg {
+        // Use color ouput
+        On,
+        // Use color output for ttys
+        Auto,
+        // Don't use color output
+        Off,
+    }
+}
+
+impl ColorCfg {
 }
 
 fn try_increase_stack() {
@@ -142,6 +163,9 @@ fn try_increase_stack() {
 fn main() -> Result<(), LfscError> {
     try_increase_stack();
     let args = Args::from_args();
+    if args.color == ColorCfg::Off || (args.color == ColorCfg::Auto && atty::isnt(atty::Stream::Stdout)) {
+        Paint::disable();
+    }
     let mut env = Env::default();
     for path in &args.files {
         let bytes = read(path).unwrap();
