@@ -391,7 +391,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
         for _ in 0..e.sc_depth {
             print!(" ");
         }
-        println!("sc run: {}", code);
+        println!("run [ {}", code);
         e.sc_depth += 1;
     }
     let r = try_!(match code {
@@ -568,7 +568,7 @@ pub fn run_code(e: &mut Env, cs: &Consts, code: &Code) -> Result<Rc<Expr>, LfscE
         for _ in 0..e.sc_depth {
             print!(" ");
         }
-        println!("sc ret: {}", r);
+        println!("ret ] {}", r);
     }
     Ok(r)
 }

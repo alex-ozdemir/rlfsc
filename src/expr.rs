@@ -110,7 +110,7 @@ impl Display for Expr {
                     write!(f, "_")
                 }
             }
-            Program(_) => write!(f, "<program>"),
+            Program(p) => write!(f, "{}", p.name),
         }
     }
 }

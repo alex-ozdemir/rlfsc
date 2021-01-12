@@ -204,6 +204,12 @@ pub struct Position {
     pub path: PathBuf,
 }
 
+impl std::fmt::Display for Position {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}:{} in {:?}", self.line_no, self.col_no, self.path)
+    }
+}
+
 impl<'a> LogosLexer<'a> {
     fn inner_next(&mut self) -> Option<SpanTok<'a>> {
         let next = self.inner.next();

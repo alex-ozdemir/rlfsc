@@ -244,6 +244,9 @@ fn check_app<'a, L: Lexer<'a>>(
                 ref dependent,
             } => {
                 if let Expr::Run(ref term, ref expected, _) = **dom {
+                    if cs.trace_sc {
+                        println!("Side-condition check at {}", ts.current_line().1);
+                    }
                     let res = run_code(e, cs, term)?;
                     if e.unify(&res, expected).is_err() {
                         return Err(LfscError::RunWrongResult(
