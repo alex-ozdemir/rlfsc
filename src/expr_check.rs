@@ -226,12 +226,12 @@ fn check_app<'a, L: Lexer<'a>>(
     ts: &mut L,
     e: &mut Env,
     cs: &Consts,
-    name: String,
+    head_val: Rc<Expr>,
+    head_ty: Rc<Expr>,
     create: bool,
 ) -> Result<(Option<Rc<Expr>>, Rc<Expr>), LfscError> {
-    let b = e.expr_binding(&name)?;
-    let fun = b.val.clone();
-    let mut ty = b.ty.clone();
+    let fun = head_val.clone();
+    let mut ty = head_ty;
     let mut args = Vec::new();
     let mut nargs = 0;
 
@@ -267,7 +267,13 @@ fn check_app<'a, L: Lexer<'a>>(
                     }
                 }
             }
-            _ => return Err(LfscError::TooManyArgsToIdent(name, nargs, (*ty).clone())),
+            _ => {
+                return Err(LfscError::TooManyArgs(
+                    (*head_val).clone(),
+                    nargs,
+                    (*ty).clone(),
+                ))
+            }
         }
         nargs += 1;
     }
@@ -291,6 +297,8 @@ pub fn check_create<'a, L: Lexer<'a>>(
     check(ts, e, cs, ex_ty, true).map(|(a, b)| (a.unwrap(), b))
 }
 
+// Assumes that the opening '(' has been consumed.
+// Consumes the closing ')'
 pub fn check_form<'a, L: Lexer<'a>>(
     ts: &mut L,
     e: &mut Env,
@@ -347,7 +355,12 @@ pub fn check_form<'a, L: Lexer<'a>>(
             }
             t => Err(LfscError::InvalidLambdaType(t.clone())),
         },
-        Ident => check_app(ts, e, cs, t_head.string(), create),
+        Ident => {
+            let b = e.binding(t_head.str())?;
+            let val = b.val.clone();
+            let ty = b.ty.clone();
+            check_app(ts, e, cs, val, ty, create)
+        }
         Caret => {
             let run_expr = parse_term(ts, e, cs)?;
             let ty = type_code(&run_expr, e, cs)?;
@@ -359,7 +372,11 @@ pub fn check_form<'a, L: Lexer<'a>>(
                 Rc::new(Expr::Type),
             ))
         }
-        t => Err(LfscError::UnexpectedToken("a typeable term", t)),
+        Open => {
+            let head = check_form(ts, e, cs, None, true)?;
+            check_app(ts, e, cs, head.0.unwrap(), head.1, create)
+        }
+        t => Err(LfscError::UnexpectedToken("typeable term", t)),
     }
 }
 
