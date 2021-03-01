@@ -1,6 +1,6 @@
 [package]
 name = "rlfsc"
-version = "0.2.1"
+version = "0.2.2"
 authors = ["Alex Ozdemir <aozdemir@hmc.edu>"]
 edition = "2018"
 description = "A checker for the LFSC proof language"
